@@ -65,9 +65,18 @@ class PolicyServerWrapper:
 
         logging.info("PolicyServerWrapper: loading framework from %s", self._ckpt_path)
         framework = baseframework.from_pretrained(self._ckpt_path, config_overrides=config_overrides)
-        if use_bf16:
-            framework = framework.to(torch.bfloat16)
-        framework = framework.to(device).eval()
+        if getattr(framework, 'sequence_packer', None) is not None:
+            from safetensors import safe_open
+            from starVLA.model.modules.vlm.u0_sequence import contract_hash
+            with safe_open(self._ckpt_path, framework='pt', device='cpu') as checkpoint:
+                if (checkpoint.metadata() or {}).get('sequence_contract_sha256') != contract_hash(framework.sequence_packer.contract):
+                    raise ValueError('Checkpoint and sequence contract do not match')
+        if getattr(framework, "manages_own_device", False):
+            framework = framework.eval()
+        else:
+            if use_bf16:
+                framework = framework.to(torch.bfloat16)
+            framework = framework.to(device).eval()
         self._framework = framework
 
         # Co-located metadata.
@@ -151,6 +160,15 @@ class PolicyServerWrapper:
                 "The server does not infer or reorder camera views from training config."
             ),
         }
+        u0 = self._model_cfg.get('framework', {}).get('u0', {})
+        if int(u0.get('sequence_h', 1)) > 1:
+            contract = u0.get('sequence_contract', {})
+            base['action_codec'] = contract.get('codec', 'fast')
+            base['action_token_count'] = contract.get('action_token_count', 2048)
+            base['action_token_length'] = contract.get('action_token_length')
+            base['sequence_h'] = int(u0['sequence_h'])
+            base['requires_raw_state'] = True
+            base['sequence_contract_sha256'] = u0['sequence_contract_sha256']
         # Enrich with per-embodiment keys when a default processor already exists.
         if self._default_unnorm_key is not None:
             proc = self._get_processor(self._default_unnorm_key)
@@ -190,8 +208,15 @@ class PolicyServerWrapper:
         out = self._framework.predict_action(examples=examples, **kwargs)
         normalized = np.asarray(out["normalized_actions"])  # (B, T, D)
 
-        unnorm = np.stack(
-            [proc.unapply_actions(normalized[b]) for b in range(normalized.shape[0])],
-            axis=0,
-        )
-        return {"actions": unnorm}
+        if hasattr(self._framework, 'unnormalize_actions'):
+            unnorm = self._framework.unnormalize_actions(normalized)
+        else:
+            unnorm = np.stack(
+                [proc.unapply_actions(normalized[b]) for b in range(normalized.shape[0])], axis=0,
+            )
+        result = {"actions": unnorm}
+        if 'action_tokens' in out:
+            result['action_tokens'] = out['action_tokens']
+        if 'fast_tokens' in out:
+            result['fast_tokens'] = out['fast_tokens']
+        return result

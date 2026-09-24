@@ -34,7 +34,7 @@ except ImportError:
 import wandb
 from accelerate import Accelerator, DeepSpeedPlugin
 from accelerate.logging import get_logger
-from accelerate.utils import set_seed
+from accelerate.utils import DistributedType, GradientAccumulationPlugin, set_seed
 from omegaconf import OmegaConf
 from torch.utils.data import DataLoader
 from tqdm import tqdm
@@ -48,7 +48,13 @@ from starVLA.training.trainer_utils.config_tracker import AccessTrackedConfig, w
 from starVLA.training.trainer_utils.trainer_tools import TrainerUtils, build_param_lr_groups, setup_optimizer_and_scheduler, normalize_dotlist_args
 
 deepspeed_plugin = None if os.environ.get("STARVLA_DISABLE_DEEPSPEED") == "1" else DeepSpeedPlugin()
-accelerator = Accelerator(deepspeed_plugin=deepspeed_plugin)
+accelerator = Accelerator(
+    deepspeed_plugin=deepspeed_plugin,
+    gradient_accumulation_plugin=GradientAccumulationPlugin(
+        num_steps=int(os.environ.get("STARVLA_GRAD_ACCUM_STEPS", "1")),
+        sync_each_batch=deepspeed_plugin is not None,
+    ),
+)
 accelerator.print(accelerator.state)
 
 
@@ -60,9 +66,24 @@ def _unwrap_model(accelerator, model):
 
 
 def _get_state_dict(accelerator, model):
-    if os.environ.get("STARVLA_DISABLE_DEEPSPEED") == "1":
-        return _unwrap_model(accelerator, model).state_dict()
-    return accelerator.get_state_dict(model)
+    unwrapped = _unwrap_model(accelerator, model)
+    has_checkpoint_filter = hasattr(unwrapped, "checkpoint_state_dict")
+    if (
+        has_checkpoint_filter
+        and os.environ.get("STARVLA_DISABLE_DEEPSPEED") != "1"
+        and accelerator.distributed_type == DistributedType.DEEPSPEED
+        and accelerator.deepspeed_config["zero_optimization"]["stage"] == 3
+    ):
+        # This is collective: every rank must participate. Gathering only trainable
+        # parameters avoids materializing the frozen 34B backbone on rank zero.
+        state_dict = model._zero3_consolidated_16bit_state_dict(exclude_frozen_parameters=True)
+    elif os.environ.get("STARVLA_DISABLE_DEEPSPEED") == "1":
+        state_dict = _unwrap_model(accelerator, model).state_dict()
+    else:
+        state_dict = accelerator.get_state_dict(model)
+    if state_dict is not None and has_checkpoint_filter:
+        state_dict = unwrapped.checkpoint_state_dict(state_dict)
+    return state_dict
 
 # Sane Defaults
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
@@ -275,15 +296,22 @@ class VLATrainer(TrainerUtils):
 
     def _save_checkpoint(self):
         """Save current training state."""
+        if int(self.config.framework.get('u0', {}).get('sequence_h', 1)) > 1:
+            evidence = dict(step=self.completed_steps, rank=self.accelerator.process_index,
+                            peak_allocated_gib=torch.cuda.max_memory_allocated()/2**30,
+                            peak_reserved_gib=torch.cuda.max_memory_reserved()/2**30)
+            Path(self.config.output_dir, f'memory_rank_{self.accelerator.process_index}.json').write_text(json.dumps(evidence))
+        state_dict = _get_state_dict(self.accelerator, self.model)
         if self.accelerator.is_main_process:
             save_format = getattr(self.config.trainer, "save_format", "pt")
             checkpoint_path = os.path.join(self.checkpoint_dir, f"steps_{self.completed_steps}")
 
-            state_dict = _get_state_dict(self.accelerator, self.model)
             if save_format == "safetensors":
                 from safetensors.torch import save_file
 
-                save_file(state_dict, checkpoint_path + "_model.safetensors")
+                u0 = self.config.framework.get('u0', {})
+                metadata = {'sequence_contract_sha256': str(u0['sequence_contract_sha256'])} if int(u0.get('sequence_h', 1)) > 1 else None
+                save_file(state_dict, checkpoint_path + "_model.safetensors", metadata=metadata)
             elif save_format == "pt":
                 torch.save(state_dict, checkpoint_path + "_pytorch_model.pt")
             else:
@@ -368,11 +396,14 @@ class VLATrainer(TrainerUtils):
                     }
                 )
 
+            step_metrics["timing/data"] = t_end_data - t_start_data
+            step_metrics["timing/model"] = t_end_model - t_start_model
+            if not self.accelerator.sync_gradients:
+                continue
+
             if self.completed_steps % self.config.trainer.eval_interval == 0:
                 step_metrics = self.eval_action_model(step_metrics)
 
-            step_metrics["timing/data"] = t_end_data - t_start_data
-            step_metrics["timing/model"] = t_end_model - t_start_model
             self._log_metrics(step_metrics)
 
             if self.completed_steps % self.config.trainer.save_interval == 0 and self.completed_steps > 0:
@@ -415,8 +446,6 @@ class VLATrainer(TrainerUtils):
     def _train_step(self, batch_vla, batch_vlm=None):
         """Execute single training step."""
         with self.accelerator.accumulate(self.model):
-            self.optimizer.zero_grad()
-
             with torch.autocast("cuda", dtype=torch.bfloat16):
                 output_dict = self.model.forward(batch_vla)
                 action_loss = output_dict["action_loss"]
@@ -435,22 +464,30 @@ class VLATrainer(TrainerUtils):
             # at min_lr well before max_train_steps is reached.
             if self.accelerator.sync_gradients:
                 self.lr_scheduler.step()
+            self.optimizer.zero_grad()
 
         return {
             "action_dit_loss": action_loss.item(),
+            **{k: output_dict[k].detach().item() for k in (
+                'action_ce', 'future_image_ce', 'action_token_count',
+                'future_image_token_count', 'action_accuracy', 'sequence_tokens',
+            ) if k in output_dict},
+            "peak_memory_gib": torch.cuda.max_memory_allocated() / 2**30,
         }
 
     def _finalize_training(self):
         """Training end processing."""
+        state_dict = _get_state_dict(self.accelerator, self.model)
         if self.accelerator.is_main_process:
             save_format = getattr(self.config.trainer, "save_format", "pt")
             final_checkpoint = os.path.join(self.config.output_dir, "final_model")
             os.makedirs(final_checkpoint, exist_ok=True)
-            state_dict = _get_state_dict(self.accelerator, self.model)
             if save_format == "safetensors":
                 from safetensors.torch import save_file
 
-                save_file(state_dict, os.path.join(final_checkpoint, "model.safetensors"))
+                u0 = self.config.framework.get('u0', {})
+                metadata = {'sequence_contract_sha256': str(u0['sequence_contract_sha256'])} if int(u0.get('sequence_h', 1)) > 1 else None
+                save_file(state_dict, os.path.join(final_checkpoint, "model.safetensors"), metadata=metadata)
             elif save_format == "pt":
                 torch.save(state_dict, os.path.join(final_checkpoint, "pytorch_model.pt"))
             else:

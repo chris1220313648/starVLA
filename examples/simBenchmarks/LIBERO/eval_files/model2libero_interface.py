@@ -38,15 +38,27 @@ class ModelClient:
         adaptive_ensemble_alpha: float = 0.1,
         host: str = "0.0.0.0",
         port: int = 10095,
-        image_size: Sequence[int] = (224, 224),
+        image_size: Optional[Sequence[int]] = (224, 224),
+        execution_horizon: Optional[int] = None,
     ) -> None:
         # Connect & receive handshake metadata (action_chunk_size, etc.)
         self.client = WebsocketClientPolicy(host, port)
         meta = self.client.get_server_metadata()
         self.action_chunk_size = int(meta["action_chunk_size"])
+        self.execution_horizon = int(execution_horizon or self.action_chunk_size)
+        if not 1 <= self.execution_horizon <= self.action_chunk_size:
+            self.client.close()
+            raise ValueError(f"execution_horizon must be in [1, {self.action_chunk_size}]")
         self._server_metadata = meta
+        self.sequence_h = int(meta.get('sequence_h', 1))
+        self.action_codec = meta.get('action_codec', 'fast')
+        self.action_token_count = int(meta.get('action_token_count', 2048))
+        self.action_token_length = meta.get('action_token_length')
+        self.sequence_history = []
+        self.pending_history = None
+        self.last_step = None
 
-        self.image_size: tuple = tuple(image_size)
+        self.image_size = tuple(image_size) if image_size is not None else None
         self.policy_setup = policy_setup
         self.unnorm_key = unnorm_key
         print(
@@ -79,7 +91,7 @@ class ModelClient:
             self.action_ensembler = None
         self.num_image_history = 0
 
-        # Cached unnormalized chunk; refreshed every `action_chunk_size` steps.
+        # Cached unnormalized chunk; refresh after execution_horizon steps.
         self.raw_actions: Optional[np.ndarray] = None
 
     def _add_image_to_history(self, image: np.ndarray) -> None:
@@ -87,6 +99,9 @@ class ModelClient:
         self.num_image_history = min(self.num_image_history + 1, self.horizon)
 
     def reset(self, task_description: str) -> None:
+        self.sequence_history = []
+        self.pending_history = None
+        self.last_step = None
         self.task_description = task_description
         self.image_history.clear()
         if self.action_ensemble:
@@ -111,6 +126,10 @@ class ModelClient:
         task_description = example.get("lang", None)
         if task_description != self.task_description:
             self.reset(task_description)
+        if self.sequence_h > 1:
+            if self.last_step is not None and step != self.last_step + 1:
+                self.reset(task_description)
+            self.last_step = step
 
         # Resize images to self.image_size if needed.
         if self.image_size and example.get("image"):
@@ -128,7 +147,12 @@ class ModelClient:
             example = {**example, "image": resized}
 
         # Refresh chunk if needed.
-        if step % self.action_chunk_size == 0 or self.raw_actions is None:
+        if step % self.execution_horizon == 0 or self.raw_actions is None:
+            if self.sequence_h > 1:
+                if self.pending_history is not None and step % self.execution_horizon == 0:
+                    self.sequence_history.append(self.pending_history)
+                    self.sequence_history = self.sequence_history[-(self.sequence_h - 1):]
+                example = {**example, 'history': list(self.sequence_history)}
             vla_input = {
                 "examples": [example],
                 "unnorm_key": self.unnorm_key,
@@ -146,7 +170,11 @@ class ModelClient:
             #   - image order : the ordering of those camera views
             #   - action normalization: unnorm_key must match the training dataset stats
             # ==============================================================================
-            response = self.client.predict_action(vla_input)
+            try:
+                response = self.client.predict_action(vla_input)
+            except Exception:
+                self.reset(task_description)
+                raise
             try:
                 actions_batch = response["data"]["actions"]  # (B, T, D), unnormalized server-side
             except KeyError:
@@ -154,9 +182,23 @@ class ModelClient:
                     f"Key 'actions' not found in response data: keys={list(response.get('data', {}).keys())}, "
                     f"full response={response}"
                 )
-            self.raw_actions = np.asarray(actions_batch)[0]  # (T, D)
+            batch = np.asarray(actions_batch)
+            if batch.shape != (1, self.action_chunk_size, 7) or not np.isfinite(batch).all():
+                self.reset(task_description)
+                raise ValueError(f"Invalid action chunk: {batch.shape}")
+            self.raw_actions = batch[0]  # (T, D)
+            if self.sequence_h > 1:
+                token_key = 'action_tokens' if self.action_codec == 'oat' else 'fast_tokens'
+                tokens = response['data'].get(token_key, [])
+                if (len(tokens) != 1 or not tokens[0]
+                        or any(not isinstance(t, (int, np.integer)) or not 0 <= t < self.action_token_count for t in tokens[0])
+                        or (self.action_token_length is not None and len(tokens[0]) != self.action_token_length)):
+                    self.reset(task_description)
+                    raise ValueError('History inference requires valid action tokens')
+                self.pending_history = dict(image=[np.array(v, copy=True) for v in example['image']],
+                                            state=np.array(example['state'], copy=True), **{token_key: tokens[0]})
 
-        raw_actions = self.raw_actions[step % self.action_chunk_size][None]
+        raw_actions = self.raw_actions[step % self.execution_horizon][None]
         raw_action = {
             "world_vector": np.array(raw_actions[0, :3]),
             "rotation_delta": np.array(raw_actions[0, 3:6]),

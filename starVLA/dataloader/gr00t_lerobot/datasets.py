@@ -1372,14 +1372,17 @@ class LeRobotSingleDataset(Dataset):
             dict: The data for the step.
         """
         trajectory_id, base_index = self.all_steps[index]
+        return self.get_training_sample(trajectory_id, base_index)
+
+    def get_training_sample(self, trajectory_id, base_index):
         raw_data = self.get_step_data(trajectory_id, base_index)
         data = self.transforms(raw_data)
         return self._pack_sample(data)
 
-    def _pack_sample(self, data: dict) -> dict:
+    def _pack_sample(self, data: dict, image_codes=None) -> dict:
         """Pack transformed modality data into training sample format."""
         step_images = []
-        for video_key in self.modality_keys["video"]:
+        for video_key in (self.modality_keys["video"] if image_codes is None else []):
             image = data[video_key][0]
             image = Image.fromarray(image).resize((224, 224))
             step_images.append(image)
@@ -1396,6 +1399,8 @@ class LeRobotSingleDataset(Dataset):
             "lang": language,
             "robot_tag": self.tag
         }
+        if image_codes is not None:
+            sample["image_codes"] = image_codes
 
         if self.data_cfg is not None and self.data_cfg.get("include_state", False) not in ["False", False]:
             state = []
@@ -1415,7 +1420,7 @@ class LeRobotSingleDataset(Dataset):
 
         return sample
 
-    def get_step_data(self, trajectory_id: int, base_index: int) -> dict:
+    def get_step_data(self, trajectory_id: int, base_index: int, skip_video: bool = False) -> dict:
         """Get the RAW data for a single step in a trajectory. No transforms are applied.
 
         Args:
@@ -1446,6 +1451,8 @@ class LeRobotSingleDataset(Dataset):
         self.curr_traj_data = self.get_trajectory_data(trajectory_id)
         # TODO @JinhuiYE The logic below is poorly implemented. Data reading should be directly based on curr_traj_data.
         for modality in self.modality_keys:
+            if skip_video and modality == "video":
+                continue
             # Get the data corresponding to each key in the modality
             for key in self.modality_keys[modality]:
                 data[key] = self.get_data_by_modality(trajectory_id, modality, key, base_index)
@@ -2328,6 +2335,10 @@ class LeRobotMixtureDataset(Dataset):
         dataset_index = rng.choice(len(self.datasets), p=self.dataset_sampling_weights)
         dataset = self.datasets[dataset_index]
 
+        if hasattr(dataset, 'sample_window'):
+            trajectory_id, base_index = dataset.sample_window(rng)
+            return dataset, trajectory_id, base_index
+
         # Sample trajectory
         trajectory_index = rng.choice(
             len(dataset.trajectory_ids), p=self.trajectory_sampling_weights[dataset_index]
@@ -2381,9 +2392,7 @@ class LeRobotMixtureDataset(Dataset):
                         break
                     index = random.randint(0, len(self) - 1)
                     
-                raw_data = dataset.get_step_data(trajectory_id, step)    
-                data = dataset.transforms(raw_data)
-                sample = dataset._pack_sample(data)
+                sample = dataset.get_training_sample(trajectory_id, step)
                 
                 return sample
                 

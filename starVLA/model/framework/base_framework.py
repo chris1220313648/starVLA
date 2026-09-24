@@ -179,6 +179,10 @@ class baseframework(PreTrainedModel):
             f"{type(self).__name__} must implement predict_action(examples) -> dict with 'normalized_actions' key."
         )
 
+    def load_checkpoint_state_dict(self, state_dict: dict) -> None:
+        """Restore a checkpoint; adapter frameworks may override this hook."""
+        self.load_state_dict(state_dict, strict=True)
+
     # ------------------------------------------------------------------
     # Unified loss interface for Trainer
     # ------------------------------------------------------------------
@@ -303,7 +307,11 @@ class baseframework(PreTrainedModel):
         model_keys = set(FrameworkModel.state_dict().keys())
         checkpoint_keys = set(model_state_dict.keys())
         try:
-            FrameworkModel.load_state_dict(model_state_dict, strict=True)
+            checkpoint_loader = getattr(FrameworkModel, "load_checkpoint_state_dict", None)
+            if checkpoint_loader is None:
+                FrameworkModel.load_state_dict(model_state_dict, strict=True)
+            else:
+                checkpoint_loader(model_state_dict)
         except RuntimeError as e:
             # must keep all keys matched
             common_keys = model_keys.intersection(checkpoint_keys)

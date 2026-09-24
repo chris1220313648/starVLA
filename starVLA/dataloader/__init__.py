@@ -38,6 +38,13 @@ def build_dataloader(cfg, dataset_py="lerobot_datasets_oxe"): # TODO now here on
     if dataset_py == "lerobot_datasets":
         from starVLA.dataloader.lerobot_datasets import get_vla_dataset, collate_fn
         vla_dataset_cfg = cfg.datasets.vla_data
+        if cfg.framework.name in ("U0Fast", "U0PI05"):
+            cached = bool(cfg.framework.u0.get("use_cached_vision", False))
+            if cached != bool(vla_dataset_cfg.get("u0_vision_cache_dir")):
+                raise ValueError("U0 use_cached_vision and u0_vision_cache_dir must be enabled together")
+            if cached:
+                from starVLA.dataloader.u0_vision_cache import cache_recipe
+                vla_dataset_cfg.u0_vision_cache_recipe = cache_recipe(cfg)
 
         vla_dataset = get_vla_dataset(
             data_cfg=vla_dataset_cfg,

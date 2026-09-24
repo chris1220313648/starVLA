@@ -71,9 +71,7 @@ class Fast_Action_Tokenizer(nn.Module):
     def __init__(self, fast_tokenizer_name="playground/Pretrained_models/fast"):
         super().__init__()
 
-        self.fast_tokenizer = AutoProcessor.from_pretrained(
-            fast_tokenizer_name, trust_remote_code=True
-        )  # load https://huggingface.co/physical-intelligence/fast
+        self.fast_tokenizer = _load_fast_processor(fast_tokenizer_name)
 
     def encoder_action2fastoken(self, raw_actions):
         # x: (batch_size, chunck, dim)
@@ -116,7 +114,9 @@ def get_action_model(config=None):
     Returns:
         ActionModel: Initialized diffusion action head.
     """
-    action_model = Fast_Action_Tokenizer()
+    action_cfg = config.framework.get("action_model", {}) if config is not None else {}
+    tokenizer_path = action_cfg.get("fast_tokenizer_name", "playground/Pretrained_models/fast")
+    action_model = Fast_Action_Tokenizer(fast_tokenizer_name=tokenizer_path)
 
     return action_model
 

@@ -247,6 +247,8 @@ wandb/*
 !docs/model_zoo.md
 !docs/starVLA_guideline.md
 !docs/WM4A.md
+!docs/U0Fast.md
+!starVLA/model/modules/vlm/u0/README.md
 
 
 logs/*

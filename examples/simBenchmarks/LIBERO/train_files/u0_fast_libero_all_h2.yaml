@@ -1,0 +1,67 @@
+run_id: u0_fast_libero_all_zero2_h2_20k
+run_root_dir: playground/Checkpoints
+seed: 42
+wandb_entity: null
+wandb_project: starVLA_Libero
+is_debug: false
+version_id: '0.21'
+framework:
+  name: U0Fast
+  u0:
+    base_vlm: /root/nas/code/Xiaomi-Robotics-U0/training/models/Xiaomi-Robotics-U0-4B
+    vision_tokenizer: playground/Pretrained_models/Emu3.5-VisionTokenizer
+    action_token_start_id: 149595
+    image_size: 224
+    max_length: 2048
+    max_new_tokens: 64
+    attn_implementation: flash_attention_2
+    gradient_checkpointing: true
+    loss_chunk_tokens: 64
+    use_cached_vision: true
+    sequence_h: 2
+  action_model:
+    action_model_type: FAST
+    action_dim: 7
+    action_horizon: 8
+    fast_tokenizer_name: playground/Pretrained_models/fast
+datasets:
+  vla_data:
+    dataset_py: lerobot_datasets
+    data_root_dir: playground/Datasets/LEROBOT_LIBERO_DATA
+    data_mix: libero_all
+    action_type: delta_qpos
+    sequential_step_sampling: false
+    per_device_batch_size: 4
+    num_workers: 1
+    pin_memory: false
+    load_all_data_for_training: true
+    video_backend: torchvision_av
+    u0_vision_cache_dir: playground/Datasets/U0_VISION_CACHE
+    sequence_h: 2
+trainer:
+  max_train_steps: 20000
+  num_warmup_steps: 1000
+  save_interval: 5000
+  eval_interval: 20001
+  save_format: safetensors
+  learning_rate:
+    base: 1.0e-05
+  lr_scheduler_type: cosine_with_min_lr
+  scheduler_specific_kwargs:
+    min_lr: 1.0e-06
+  freeze_modules: ''
+  loss_scale:
+    vla: 1.0
+  max_grad_norm: 1.0
+  weight_decay: 0.1
+  logging_frequency: 1
+  gradient_clipping: 1.0
+  gradient_accumulation_steps: 8
+  gradient_checkpointing: true
+  optimizer:
+    name: AdamW
+    betas:
+    - 0.9
+    - 0.95
+    eps: 1.0e-08
+    weight_decay: 0.1

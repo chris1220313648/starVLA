@@ -64,7 +64,16 @@ def make_LeRobotSingleDataset(
             dataset_name=data_name,
         )
 
-    return LeRobotSingleDataset(
+    dataset_cls = LeRobotSingleDataset
+    if data_cfg and data_cfg.get("u0_vision_cache_dir"):
+        if robot_type != "libero_franka":
+            raise ValueError("U0 vision cache currently supports only libero_franka")
+        from starVLA.dataloader.u0_vision_cache import CachedLiberoDataset
+        dataset_cls = CachedLiberoDataset
+        if int(data_cfg.get("sequence_h", 1)) > 1:
+            from starVLA.dataloader.u0_sequence import SequenceLiberoDataset
+            dataset_cls = SequenceLiberoDataset
+    return dataset_cls(
         dataset_path=dataset_path,
         modality_configs=modality_config,
         transforms=transforms,

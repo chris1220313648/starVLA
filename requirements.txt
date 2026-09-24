@@ -23,6 +23,7 @@ numpydantic==1.6.9
 deepspeed==0.16.9
 qwen-vl-utils
 omegaconf
+peft==0.17.1
 numpy==1.26.4
 wandb
 rich
