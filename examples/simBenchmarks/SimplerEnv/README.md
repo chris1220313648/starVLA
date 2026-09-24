@@ -61,7 +61,7 @@ Available SimplerEnv WidowX checkpoints (see [docs/model_zoo.md](../../docs/mode
 In the first terminal, activate the `starVLA` conda environment and run:  
 
 ```bash
-bash examples/simBenchmarks/SimplerEnv/eval_files/run_policy_server.sh
+seed=7 bash examples/simBenchmarks/SimplerEnv/eval_files/run_policy_server.sh
 ```
 
 ⚠️ **Note:** Please ensure that you specify the correct checkpoint path in  
@@ -79,6 +79,21 @@ export MODEL_PATH=.../checkpoints/steps_50000_pytorch_model.pt # for read normon
 bash examples/simBenchmarks/SimplerEnv/start_simpler_env.sh ${MODEL_PATH} 
 ```
 This script will automatically launch the WidowX Robot evaluation tasks, reproducing the benchmark results reported above.
+
+Reproducible seed control and evaluation provenance were added in
+[PR #461](https://github.com/starVLA/starVLA/pull/461). Pass a fixed seed to
+the evaluator and optionally write a machine-readable summary for each run:
+
+```bash
+seed=7 bash examples/simBenchmarks/SimplerEnv/eval_files/start_simpler_env.sh ${MODEL_PATH}
+```
+
+Use the same `seed` value for the policy server and evaluator. The direct
+entrypoint accepts `--seed` and `--results-file` as well. The JSON summary
+records the seed, the checkpoint reported by the policy server, environment,
+task, robot, episode counts, and per-episode success values so that results can
+be compared across runs. Evaluation stops if the server does not report a seed
+or if its seed differs from the evaluator seed.
 
 ⚠️ **Note:** Please ensure that you specify the correct `SimplerEnv_PATH`in 
 `start_simpler_env.sh`  
@@ -154,5 +169,3 @@ bash ./examples/simBenchmarks/SimplerEnv/train_files/run_oxe_train.sh
 ```
 
 ⚠️ **Note:** Ensure that the script explicitly uses the validated config path in `run_lerobot_datasets.sh`. If not already passed, add the `--config_yaml` argument.
-
-
