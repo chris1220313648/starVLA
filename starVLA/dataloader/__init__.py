@@ -35,10 +35,14 @@ def save_dataset_statistics(dataset_statistics, run_dir):
 
 def build_dataloader(cfg, dataset_py="lerobot_datasets_oxe"): # TODO now here only is get dataset, we need mv dataloader to here
 
-    if dataset_py == "lerobot_datasets":
+    if dataset_py in ("lerobot_datasets", "robotwin_eef", "robotwin_eef_lerobot"):
         from starVLA.dataloader.lerobot_datasets import get_vla_dataset, collate_fn
         vla_dataset_cfg = cfg.datasets.vla_data
 
+        if dataset_py == "robotwin_eef":
+            from examples.simBenchmarks.Robotwin.train_files.robotwin_eef_dataset import get_vla_dataset
+        elif dataset_py == "robotwin_eef_lerobot":
+            from examples.simBenchmarks.Robotwin.train_files.robotwin_eef_lerobot_dataset import get_vla_dataset
         vla_dataset = get_vla_dataset(
             data_cfg=vla_dataset_cfg,
             balance_dataset_weights=vla_dataset_cfg.get("balance_dataset_weights", False),
@@ -50,7 +54,7 @@ def build_dataloader(cfg, dataset_py="lerobot_datasets_oxe"): # TODO now here on
             "collate_fn": collate_fn,
             "num_workers": num_workers,
             "pin_memory": bool(vla_dataset_cfg.get("pin_memory", True)),
-            # shuffle=True
+            "shuffle": dataset_py in ("robotwin_eef", "robotwin_eef_lerobot"),
         }
         if num_workers > 0:
             dataloader_kwargs["persistent_workers"] = bool(vla_dataset_cfg.get("persistent_workers", True))

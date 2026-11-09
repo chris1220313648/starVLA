@@ -36,7 +36,7 @@ def _load_fast_processor(pretrained_path: str = "physical-intelligence/fast"):
     from huggingface_hub import snapshot_download
     import importlib.util
 
-    local_dir = snapshot_download(pretrained_path)
+    local_dir = pretrained_path if os.path.isdir(pretrained_path) else snapshot_download(pretrained_path)
 
     spec = importlib.util.spec_from_file_location(
         "processing_action_tokenizer",
@@ -71,9 +71,7 @@ class Fast_Action_Tokenizer(nn.Module):
     def __init__(self, fast_tokenizer_name="playground/Pretrained_models/fast"):
         super().__init__()
 
-        self.fast_tokenizer = AutoProcessor.from_pretrained(
-            fast_tokenizer_name, trust_remote_code=True
-        )  # load https://huggingface.co/physical-intelligence/fast
+        self.fast_tokenizer = _load_fast_processor(fast_tokenizer_name)
 
     def encoder_action2fastoken(self, raw_actions):
         # x: (batch_size, chunck, dim)
@@ -116,7 +114,9 @@ def get_action_model(config=None):
     Returns:
         ActionModel: Initialized diffusion action head.
     """
-    action_model = Fast_Action_Tokenizer()
+    action_model = Fast_Action_Tokenizer(
+        config.framework.action_model.get("fast_tokenizer", "playground/Pretrained_models/fast")
+    )
 
     return action_model
 

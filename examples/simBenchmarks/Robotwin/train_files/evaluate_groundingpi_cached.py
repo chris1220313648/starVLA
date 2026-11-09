@@ -41,6 +41,7 @@ def main():
     parser.add_argument('--checkpoint', type=Path)
     parser.add_argument('--output', type=Path)
     parser.add_argument('--gpus', default='0,1,2,3,4,5,6,7')
+    parser.add_argument('--concurrency', type=int, help='Evaluation workers; defaults to GPU count')
     parser.add_argument('--cache-source', type=Path, default=CACHE_SOURCE)
     parser.add_argument('--check-cache', action='store_true')
     parser.add_argument('--suites', nargs='+', choices=SUITES, default=list(SUITES))
@@ -54,6 +55,9 @@ def main():
     gpus = args.gpus.split(',')
     if not gpus or not all(g.isdigit() for g in gpus) or len(set(gpus)) != len(gpus):
         parser.error('GPU IDs must be unique integers')
+    concurrency = len(gpus) if args.concurrency is None else args.concurrency
+    if concurrency <= 0:
+        parser.error('concurrency must be positive')
     robotwin = WORKSPACE / 'simulation/RoboTwin'
 
     def check_cache():
@@ -71,7 +75,8 @@ def main():
     args.output = args.output.resolve()
     args.checkpoint = args.checkpoint.resolve()
     args.output.mkdir(parents=True, exist_ok=False)
-    summary = {'state': 'validating_cache', 'suites': {}}
+    summary = {'state': 'validating_cache', 'suites': {},
+               'concurrency': concurrency, 'replicas': len(gpus)}
     marker = str(args.output / 'parity-{pid}.json')
     parent_status = args.output.parent/'status.json'
 
@@ -106,6 +111,7 @@ def main():
             'checkpoint': str(args.checkpoint), 'checkpoint_sha256': digest(args.checkpoint),
             'seed_cache_source': str(args.cache_source/'seed-cache'),
             'episodes_per_task': 20, 'gpus': gpus, 'autotune': False,
+            'concurrency': concurrency, 'replicas': len(gpus),
             'revisions': {name: revision(path) for name, path in {
                 'kit': KIT, 'starvla': ROOT, 'robotwin': robotwin}.items()},
             'kit_diff': subprocess.check_output(['git', '-C', str(KIT), 'diff'], text=True),
@@ -129,7 +135,7 @@ def main():
                            '--policy-config', str(args.output/'policy.json'),
                            '--output-dir', str(args.output/name)]
                 command += ['--quick-test'] if smoke else [
-                    '--episodes', '20', '--concurrency', str(len(gpus)), '--replicas', str(len(gpus))]
+                    '--episodes', '20', '--concurrency', str(concurrency), '--replicas', str(len(gpus))]
                 parity_before = set(args.output.glob('parity-*.json'))
                 try:
                     run(command, args.output/f'{name}.log',

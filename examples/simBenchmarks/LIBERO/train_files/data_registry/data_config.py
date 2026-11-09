@@ -135,3 +135,53 @@ DATASET_NAMED_MIXTURES = {
         ("LEROBOT_LIBERO_DATA/libero_10_no_noops_1.0.0_lerobot", 1.0, "libero_franka"),
     ],
 }
+
+
+class LiberoV3DataConfig(Libero4in1DataConfig):
+    """GroundingPI contract: two cameras, raw 8-D state, 16 delta actions."""
+    action_indices = list(range(16))
+
+
+from starVLA.dataloader.gr00t_lerobot.transform.base import ModalityTransform
+
+
+class ClipNormalizedState(ModalityTransform):
+    def apply(self, data):
+        for key in self.apply_to:
+            if key in data:
+                data[key] = data[key].clamp(-1, 1)
+        return data
+
+
+class GroundingPIV3GoalDataConfig(LiberoV3DataConfig):
+    def transform(self):
+        transforms = [
+            StateActionToTensor(apply_to=self.state_keys),
+            StateActionTransform(apply_to=self.state_keys,
+                                 normalization_modes={key: 'min_max' for key in self.state_keys}),
+            ClipNormalizedState(apply_to=self.state_keys),
+        ]
+        return ComposedModalityTransform(transforms=transforms + super().transform().transforms)
+
+
+ROBOT_TYPE_CONFIG_MAP['groundingpi_v3_goal_franka'] = GroundingPIV3GoalDataConfig()
+DATASET_NAMED_MIXTURES['groundingpi_v3_libero_goal'] = [('libero_goal', 1.0, 'groundingpi_v3_goal_franka')]
+
+
+ROBOT_TYPE_CONFIG_MAP["libero_v3_franka"] = LiberoV3DataConfig()
+_LIBERO_V3_SUITES = ("libero_spatial", "libero_object", "libero_goal", "libero_10", "libero_90")
+for _suite in _LIBERO_V3_SUITES:
+    DATASET_NAMED_MIXTURES[f"{_suite}_v3"] = [(_suite, 1.0, "libero_v3_franka")]
+DATASET_NAMED_MIXTURES["libero_v3_four"] = [
+    (suite, 1.0, "libero_v3_franka") for suite in _LIBERO_V3_SUITES[:4]
+]
+DATASET_NAMED_MIXTURES["libero_v3_five"] = [
+    (suite, 1.0, "libero_v3_franka") for suite in _LIBERO_V3_SUITES
+]
+
+# PI05 discretizes normalized state; keep the raw-state PI data contract intact.
+ROBOT_TYPE_CONFIG_MAP['groundingpi_pi05_franka'] = GroundingPIV3GoalDataConfig()
+for _suite in _LIBERO_V3_SUITES:
+    DATASET_NAMED_MIXTURES[f'groundingpi_pi05_{_suite}'] = [(_suite, 1.0, 'groundingpi_pi05_franka')]
+for _name, _suites in [('four', _LIBERO_V3_SUITES[:4]), ('five', _LIBERO_V3_SUITES)]:
+    DATASET_NAMED_MIXTURES[f'groundingpi_pi05_{_name}'] = [(s, 1.0, 'groundingpi_pi05_franka') for s in _suites]

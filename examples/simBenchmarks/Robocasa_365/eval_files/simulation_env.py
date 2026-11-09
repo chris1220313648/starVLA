@@ -136,6 +136,7 @@ class Args:
     max_episode_steps: int = 500
     n_action_steps: int = 8
     video_out_path: Optional[str] = "results/robocasa365_eval_test/videos"
+    save_video: bool = os.environ.get("SIM_SAVE_VIDEO", "1") == "1"
     seed: int = 7
     pretrained_path: str = (
         "playground/Checkpoints/robocasa365_qwenoft_OpenDrawer_100step/checkpoints/steps_100_pytorch_model.pt"
@@ -157,7 +158,7 @@ def main(args: Args) -> None:
         env_name=args.env_name,
         n_episodes=args.n_episodes,
         n_envs=args.n_envs,
-        video=VideoConfig(video_dir=args.video_out_path),
+        video=VideoConfig(video_dir=args.video_out_path if args.save_video else None),
         multistep=MultiStepConfig(
             n_action_steps=args.n_action_steps, max_episode_steps=args.max_episode_steps
         ),

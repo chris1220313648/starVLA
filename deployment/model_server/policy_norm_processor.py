@@ -357,6 +357,18 @@ class PolicyNormProcessor:
     # ------------------------------------------------------------------
     # Inverse path (model output → env action)
     # ------------------------------------------------------------------
+    def apply_state(self, state: np.ndarray) -> np.ndarray:
+        """Normalize raw state using the registered training transforms, once."""
+        state = np.asarray(state, dtype=np.float32)
+        if state.ndim == 1:
+            state = state[None]
+        dims = [self._state_key_dims[key] for key in self._state_keys]
+        if state.ndim != 2 or state.shape[-1] != sum(dims):
+            raise ValueError(f'Unexpected state shape: {state.shape}; expected (*, {sum(dims)})')
+        pieces = np.split(state, np.cumsum(dims)[:-1], axis=-1)
+        data = self._transform({key: value.copy() for key, value in zip(self._state_keys, pieces)})
+        return np.concatenate([np.asarray(data[key]) for key in self._state_keys], axis=-1).astype(np.float32)
+
     def unapply_actions(self, normalized_actions: np.ndarray) -> np.ndarray:
         """Invert action normalization using the training-time pipeline.
 

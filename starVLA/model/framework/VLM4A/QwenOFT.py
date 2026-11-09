@@ -142,8 +142,8 @@ class Qwenvl_OFT(baseframework):
         self.chunk_len = self.action_horizon
         # self.hidden_dim = config.framework.action_model.action_hidden_dim
 
-        self.action_token = "🔍"  # TODO also can add spacail token to Qwen, but too complex
-        self.action_token_id = self.qwen_vl_interface.processor.tokenizer("🔍", add_special_tokens=False)["input_ids"][0]
+        self.action_token = getattr(self.qwen_vl_interface, "action_token", "🔍")
+        self.action_token_id = self.qwen_vl_interface.processor.tokenizer(self.action_token, add_special_tokens=False)["input_ids"][0]
 
     def forward(
         self,

@@ -39,6 +39,7 @@ class ModelClient:
         host: str = "0.0.0.0",
         port: int = 10095,
         image_size: Sequence[int] = (224, 224),
+        image_resample: str = "bilinear",
     ) -> None:
         # Connect & receive handshake metadata (action_chunk_size, etc.)
         self.client = WebsocketClientPolicy(host, port)
@@ -46,6 +47,7 @@ class ModelClient:
         self.action_chunk_size = int(meta["action_chunk_size"])
         self._server_metadata = meta
 
+        self.image_resample = {"bilinear": Image.Resampling.BILINEAR, "bicubic": Image.Resampling.BICUBIC}[image_resample]
         self.image_size: tuple = tuple(image_size)
         self.policy_setup = policy_setup
         self.unnorm_key = unnorm_key
@@ -121,7 +123,7 @@ class ModelClient:
                 if arr.shape[:2] != target_hw:
                     arr = np.asarray(
                         Image.fromarray(arr).resize(
-                            (target_hw[1], target_hw[0]), Image.BILINEAR
+                            (target_hw[1], target_hw[0]), self.image_resample
                         )
                     )
                 resized.append(arr)

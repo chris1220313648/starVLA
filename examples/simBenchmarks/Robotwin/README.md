@@ -294,6 +294,31 @@ Optional:
 - If you need the scripts to run the bootstrap `pip install` steps for you, set `export ROBOTWIN_AUTO_INSTALL_DEPS=1`.
 - If your conda env names are different, set `ROBOTWIN_STARVLA_ENV` and `ROBOTWIN_ENV`.
 
+The bundled cuRobo uses `warp.torch`, which Warp 1.13 removed. The eval requirements
+pin `warp-lang==1.8.0`; the launcher checks this import before starting policy servers.
+If every task repeatedly logs `error occurs !` with no completed episodes, inspect
+the `except Exception` handler around `TASK_ENV.setup_demo()` / `play_once()` in
+your RoboTwin `script/eval_policy.py`. Enable the traceback and fail fast there:
+
+```python
+except Exception:
+    traceback.print_exc()
+    if os.environ.get("ROBOTWIN_FAIL_FAST_SETUP") == "1":
+        raise
+    TASK_ENV.close_env()
+    now_seed += 1
+    args["render_freq"] = render_freq
+    continue
+```
+
+`eval.sh` defaults `ROBOTWIN_FAIL_FAST_SETUP=1`. Keep the separate `UnStableError`
+handler so ordinary unstable scene seeds can still be skipped.
+
+Video recording also requires an `ffmpeg` executable (for example,
+`conda install -n robotwin -c conda-forge ffmpeg`). The launcher adds the selected
+RoboTwin Python environment's `bin` directory to `PATH` for these helpers.
+Set `SIM_SAVE_VIDEO=0` if videos are not needed.
+
 ## 🚀 2. Evaluation Workflow
 
 ### Recommended: `start_eval.sh` (unified entrypoint)
@@ -531,3 +556,240 @@ turn_switch
 ```
 
 All modes include `demo_clean` and `demo_randomized`.
+
+## Training GroundingPIPIV3 on RoboTwin Clean (LeRobot v3.0)
+
+This recipe uses only the merged `clean/` dataset under
+`/share/project/robot-rfm/robot-raw-data/robotwin2.0-lerobot-v3.0`.
+The randomized split and root-level EasyWAM statistics are not used.
+
+Default contract:
+
+| Setting | Value |
+| --- | --- |
+| Initialization | `playground/Pretrained_models/GroundingPI` backbone; fresh 14-D action head |
+| Data | 2,500 clean episodes, 549,787 frames |
+| Timing | Original 50 FPS; no resampling; 16 consecutive actions (0.32 seconds) |
+| Images | `cam_high`, `cam_left_wrist`, `cam_right_wrist`, each resized to 224×224 |
+| Action | 14-D absolute joint positions and grippers |
+| Packed state/action order | left joints (6), right joints (6), left gripper (1), right gripper (1) |
+| Normalization | Per-joint min/max computed from Clean; grippers binary at 0.5 |
+| State | `(1,14)`, normalized and appended to the instruction as 14 discrete tokens |
+| Model state encoder | Disabled (`state_dim: 0`); this does not mean state is omitted |
+| Training | 8 GPUs, batch 16 per GPU, accumulation 1, global batch 128, 10,000 steps |
+| Optimizer | AdamW; backbone LR 1e-5, projections/action head LR 1e-4; warmup 500 |
+| Runtime | ZeRO-2, gradient checkpointing; inherited GroundingPIPIV3 precision settings |
+| Checkpoints / health | Every 1,000 / 100 steps |
+
+### Prepare and validate
+
+Run from the StarVLA repository root using the existing `starvla` environment:
+
+```bash
+STARVLA_PYTHON=/share/project/robot-rfm/robot-exp/usr/cjy/envs/starvla/bin/python
+ROBOTWIN_RUNNER=examples/simBenchmarks/Robotwin/train_files/groundingpi_robotwin.py
+
+"$STARVLA_PYTHON" "$ROBOTWIN_RUNNER" prepare
+NO_ALBUMENTATIONS_UPDATE=1 OMP_NUM_THREADS=4 \
+  "$STARVLA_PYTHON" "$ROBOTWIN_RUNNER" validate
+"$STARVLA_PYTHON" "$ROBOTWIN_RUNNER" train --dry-run
+```
+
+The adapter lives at `playground/Datasets/RoboTwin_clean_v3_groundingpi/`.
+Its `clean/data` and `clean/videos` are symlinks; `clean/meta` is a local copy
+with the ordered modality mapping and local statistics/index caches. Source
+metadata is hashed before and after validation. Preparing the same adapter is
+idempotent; conflicting sources or mappings require a new `--data-root`.
+
+Validation checks all frame tables, episode counts, finite state/actions,
+frame timing, language references, referenced video files and actual stream
+FPS/resolution. It samples episode starts/ends across task groups and data/video
+file boundaries, compares actual decoded views against metadata-derived
+video paths/timestamps, and verifies action ordering and episode-end padding.
+`validation_report.json` contains the counts, sampled instructions and input
+contract; `dataset_statistics.json` contains the actual Clean normalization.
+
+### Launch later
+
+Preparation and validation never launch a model or optimizer. `train --dry-run`
+only writes a launch bundle to:
+
+```text
+playground/Checkpoints/groundingpipi_v3_robotwin_clean_8gpu_b16_10k/
+├── launch.yaml
+├── deepspeed.json
+├── accelerate.yaml
+├── dataset_statistics.json
+└── launch_command.sh
+```
+
+When the eight GPUs are available, start explicitly:
+
+```bash
+bash playground/Checkpoints/groundingpipi_v3_robotwin_clean_8gpu_b16_10k/launch_command.sh
+```
+
+The generated script invokes the guarded runner: it checks successful validation,
+then launches Accelerate and writes `train.log`. Existing training outputs are
+never overwritten. For a separate experiment, supply a new `--output` to
+`train --dry-run`. `--gpus`, `--steps`, `--batch-size`, `--workers`, `--model`,
+`--raw-data`, `--data-root` and `--train-port` are explicit overrides.
+
+For three 448×448 views, validate that resolution separately and create a new run:
+
+```bash
+"$STARVLA_PYTHON" "$ROBOTWIN_RUNNER" validate --image-size 448
+"$STARVLA_PYTHON" "$ROBOTWIN_RUNNER" train --dry-run --image-size 448 \
+  --gpus 8 --batch-size 16 --gradient-accumulation-steps 1 \
+  --output playground/Checkpoints/robotwin_clean_448_example
+```
+
+The default image size remains 224. Both loader and model preprocessing use the
+selected size; `validation_report_448.json` is separate from the original report.
+The native GroundingPI processor must produce 256 tokens per 448×448 view (768
+for three cameras). `--gradient-accumulation-steps` updates both trainer and
+DeepSpeed settings and is retained by the generated launch script. On eight
+GPUs, microbatch/accumulation pairs `16/1`, `8/2`, `4/4`, `2/8`, and `1/16`
+all give a global batch of 128. A failed run must use a fresh output directory.
+
+Only data loading and a tiny CPU model contract test have been exercised by the
+preparation workflow. Full-size model training, GPU memory use at batch 16, and
+benchmark success rates require the subsequent explicit training/evaluation run.
+
+### GroundingPIPIV3 evaluation contract
+
+Raw arrays have order `[left joints, left gripper, right joints, right gripper]`.
+To form the model state, select raw indices
+`[0,1,2,3,4,5,7,8,9,10,11,12,6,13]`; the server then normalizes it once.
+Training actions use that same packed order. The existing RoboTwin client's final
+permutation restores native action order.
+
+Set `include_state: true` in the deployment template to send the packed state.
+The `deploy_groundingpi_v3.yml` template enables this option, but defaults to
+448×448 images. For a 224×224 checkpoint, copy the template and set
+`image_size: [224, 224]` before evaluating. Camera order is head, left wrist,
+right wrist; actions are absolute joints and grippers, in chunks of 16.
+
+`schedule_groundingpi_eval.py` evaluates all 50 Clean tasks followed by all 50
+Randomized tasks, with 20 episodes per task by default. Pass `--run-dir`,
+`--deploy-template /absolute/path/to/deploy_224.yml`, `--delay-hours 0`, and a
+fresh `--output` directory for an immediate evaluation after two idle GPU checks.
+Without `--output`, batches are saved inside the training checkpoint directory at
+`eval/step<step>_<UTC timestamp>/`. A prepared launch bundle may exist there, but
+an existing `status.json` prevents reusing a previously started batch. The scheduler
+copies the deployment template into the batch and sets `ROBOTWIN_EVAL_RESULT_ROOT`
+to its `results/` directory, keeping task videos and `_result.txt` beside the logs.
+Standalone RoboTwin evaluations retain the original `eval_result/` location when
+that environment variable is unset. Batch-specific names prevent mixing runs.
+Use `--dry-run` to inspect the selected checkpoint and commands without launching.
+The scheduler records status, per-stage JSON results and `evaluation_summary.md`;
+missing task results are reported separately from policy failures. Set
+`ROBOTWIN_POLICY_SEED=0` to seed policy sampling as well as simulator seeds.
+
+The RoboTwin checkout must have its embodiment cuRobo configs generated by
+`script/update_embodiment_config_path.py`, and `ffmpeg` must be on PATH when
+video recording is enabled.
+
+### Regression checks
+
+```bash
+NO_ALBUMENTATIONS_UPDATE=1 OMP_NUM_THREADS=4 \
+  "$STARVLA_PYTHON" -m pytest -q \
+  tests/test_groundingpi_robotwin.py tests/test_groundingpi_v3.py tests/test_groundingpi_libero.py
+```
+
+### GroundingPI × π0.5 clean training and evaluation
+
+For the `GroundingPIPI05` recipe with three 224×224 views, clean-only training,
+CUDA OOM batch fallback, and 20 episodes per task in both clean and randomized
+environments, see [the pi0.5 instructions](train_files/README_groundingpi_pi05.md).
+
+
+## GroundingPI PI05: EEF20 + continuous state token
+
+A separate entry preserves the original 14-D joint/discrete-state experiments:
+
+```bash
+bash examples/simBenchmarks/Robotwin/train_files/run_groundingpi_pi05_eef.sh \
+  --output playground/Checkpoints/groundingpipi05_eef20_h32_384x320_run1
+```
+
+Defaults: 8 GPUs, batch 16/GPU, global batch 128, 50,000 optimizer steps,
+seed 42, backbone LR 1e-5, expert LR 1e-4, 10 inference steps. The pipeline
+validates all 2,500 Clean demonstrations, runs a temporary 3-step smoke and strict
+reload check, trains, then evaluates 50 tasks in clean/randomized modes with
+20 episodes each. `--steps`, `--gpus`, `--batch-size`, `--workers`, `--train-port`,
+`--raw-data`, and `--data-root` override the corresponding defaults. Smaller
+OOM-retry microbatches increase gradient accumulation to retain the initial
+global batch. No existing joint checkpoint is resumed.
+
+The new configuration uses `state_representation: continuous_expert_token`:
+a 20→1024→1024 ReLU MLP prepends one state token to 32 action tokens in the
+existing native-K/V PI05 expert. State is absent from the text prompt. Only the
+32 action positions are decoded/supervised, with padded future timesteps masked.
+The original `discrete_text` mode remains the default for old checkpoints.
+Knowledge insulation is currently rejected in the continuous-state mode.
+
+Original HDF5 files under `/share/project/robot-rfm/robot-raw-data/RoboTwin2.0/dataset`
+are read without copying videos. Install the GroundingPI requirements (including
+`h5py`). The index, provenance, min-max stats and validation report are stored in
+`/share/project/robot-rfm/robot-processed-data/robotwin_eef20_h32_v1` by default.
+EEF layout is `[L xyz(3), L rot6d(6), L grip, R xyz(3), R rot6d(6), R grip]`;
+quaternions are read in the same xyzw convention as OpenWAM. State is the current
+frame, and targets are the next 32 frames; the terminal observation alone is not
+sampled. Grippers remain continuous. Rotation components retain identity
+normalization; all other dimensions use full-dataset min-max statistics.
+
+Three RGB views share one high384×wide320 canvas: head256×320 above left/right
+wrists128×160 each. Train and evaluation use the same bilinear packing function.
+This yields 168 visual tokens with the released default GroundingPI processor.
+The EEF deploy template sends raw EEF state for server-side normalization, and
+converts predicted rot6d back to quaternions before `take_action(..., action_type="ee")`.
+Raw data, old adapters, scripts and saved experiment directories are retained.
+
+RoboTwin HDF5 JPEGs were encoded by passing RGB arrays directly to OpenCV's
+BGR encoder. The EEF reader now uses OpenCV decoding to recover normal RGB;
+do not add a BGR-to-RGB conversion. New training runs use normal RGB at evaluation.
+Checkpoints trained with the previous PIL reader instead require
+`swap_red_blue: true` in their evaluation deploy YAML. This compatibility switch
+defaults to false and applies to all three views. For the existing
+`groundingpipi05_eef20_h32_384x320_8gpu_20261030_100615` checkpoint, use
+`eval/deploy_policy_rgb_swap.yml` in that experiment directory, through
+`DEPLOY_POLICY_TEMPLATE_PATH` with `start_eval.sh` (or `--deploy-template` with
+`schedule_groundingpi_eval.py`). Write reevaluation results to a fresh directory.
+The original evaluation config/results and the 14-D LeRobot v3 reader are unchanged.
+
+### Shared CoT with original RGB videos
+
+Run `bash examples/simBenchmarks/Robotwin/train_files/run_groundingpi_pi05_eef_lerobot_rgb_cot.sh`
+to train on `robotwin2.0_EEF20_RGB_Lerobotv3/clean` with target-only CoT.
+Defaults are eight GPUs, batch 16 per GPU, 50,000 updates, absolute EEF20,
+horizon 32, and a 384×320 shared canvas. Set `OUTPUT_PATH`, `GPUS`, or
+`BATCH_SIZE` in the environment to choose a fresh output directory or GPU allocation.
+Color jitter and static resampling are disabled by default.
+
+This dataset already contains next-frame transitions: all `T-1` rows are valid,
+including the last row's action target. The reader uses `raw_length` to distinguish
+this format from legacy tables that retain a repeated terminal action.
+Normal RGB is used in training and evaluation; no red/blue compatibility swap is applied.
+
+The launcher validates the existing RoboScope scene cache before training, then
+runs data/model checks, smoke training, full training, and final checkpoint verification.
+It automatically evaluates both environments with 20 episodes per task and fixed
+worker/replica counts matching `GPUS`, without autotune or video recording.
+Copied scene caches, provenance, logs and per-task reports are stored under the
+new checkpoint directory's `eval/`. Cache hashes and the RoboTwin revision must
+match the earlier `step50000_50x20_20261105` run; failures stop the workflow.
+
+For a fresh EEF20 run with OpenWAM-matched color jitter and static-window
+resampling, add `--color-jitter 0.2 --filter-static-segments` to
+`run_groundingpi_pi05_eef.sh --output <fresh-experiment-directory>`.
+Both options default off. Brightness, contrast and saturation are applied in
+that order to the composed image, with separate uniform factors in [0.8, 1.2].
+A static window has maximum normalized first-action/state difference below
+1e-5; up to three uniformly sampled alternatives are tried, retaining the
+original if none moves. Image decoding occurs after window selection.
+Validation and checkpoint verification disable both training-only operations.
+The pipeline records arguments, source snapshot/diff and environment, checks
+all 2,500 episodes, verifies a 3-step smoke, then trains 50,000 updates and
+runs clean/randomized evaluation with normal RGB (no legacy R/B swap).

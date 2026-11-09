@@ -1,0 +1,13 @@
+policy_name: model2robotwin_interface
+task_name: null
+task_config: null
+ckpt_setting: null
+seed: null
+instruction_type: unseen
+host: "127.0.0.1"
+port: 5694
+unnorm_key: null
+action_mode: abs
+normalization_mode: min_max
+image_size: [448, 448]
+include_state: true

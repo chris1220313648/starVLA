@@ -170,7 +170,7 @@ framework:
     action_horizon: 8            # total action chunk size
 ```
 
-StarVLA supports four framework variants — just change `framework.name`:
+The Qwen-based framework variants are selected with `framework.name`:
 
 | Framework | Name | Description |
 |-----------|------|-------------|
@@ -178,6 +178,20 @@ StarVLA supports four framework variants — just change `framework.name`:
 | StarVLA-FAST | `QwenFAST` | Discrete action tokens, autoregressive |
 | StarVLA-π | `QwenPI_v3` | Flow-matching diffusion action head |
 | StarVLA-GR00T | `QwenGR00T` | Dual-system: VLM (System 2) + Flow-matching (System 1) |
+
+GroundingPI provides three additional framework names:
+
+| Backbone | `framework.name` | Action paradigm |
+| --- | --- | --- |
+| GroundingPI | `GroundingPIPI` | Layer-wise flow matching, reusing QwenPI |
+| GroundingPI | `GroundingPIOFT` | Parallel continuous action regression, reusing QwenOFT |
+| GroundingPI | `GroundingPIFast` | Autoregressive FAST action tokens, reusing QwenFast |
+
+Use the [GroundingPI configurations and environment instructions](../examples/modelExtensions/GroundingPI/README.md).
+These variants require the dedicated GroundingPI environment and complete backbone weights;
+changing only `framework.name` in a Qwen configuration is insufficient.
+All three have passed real-weight training/inference smoke tests and checkpoint reload checks;
+full robot-dataset training and task success evaluation remain to be done.
 
 ### Datasets
 

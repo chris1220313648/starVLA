@@ -34,7 +34,7 @@ except ImportError:
 import wandb
 from accelerate import Accelerator, DeepSpeedPlugin
 from accelerate.logging import get_logger
-from accelerate.utils import set_seed
+from accelerate.utils import DistributedType, set_seed
 from omegaconf import OmegaConf
 from torch.utils.data import DataLoader
 from tqdm import tqdm
@@ -306,11 +306,16 @@ class VLATrainer(TrainerUtils):
         """Record training metrics."""
         rank = dist.get_rank() if dist.is_initialized() else 0
         if self.completed_steps % self.config.trainer.logging_frequency == 0 and rank == 0:
+            engine_step = getattr(self.model, "global_steps", None)
+            if engine_step is not None:
+                metrics["optimizer_step"] = int(engine_step)
             last_lrs = self.lr_scheduler.get_last_lr()
             for i, group in enumerate(self.optimizer.param_groups):
                 group_name = group.get("name", str(i))
                 metrics[f"learning_rate/{group_name}"] = last_lrs[i] if i < len(last_lrs) else last_lrs[-1]
             metrics["epoch"] = round(self.completed_steps / len(self.vla_train_dataloader), 2)
+            with open(Path(self.config.output_dir) / "metrics.jsonl", "a") as handle:
+                handle.write(json.dumps({"step": self.completed_steps, **metrics}) + "\n")
             if getattr(self, "_wandb_enabled", False):
                 try:
                     wandb.log(metrics, step=self.completed_steps)
@@ -339,6 +344,9 @@ class VLATrainer(TrainerUtils):
 
     def train(self):
         """Execute training loop."""
+        # HF from_pretrained leaves the backbone in eval mode. Explicitly switch
+        # every submodule so dropout and gradient checkpointing work in training.
+        self.model.train()
         self._log_training_config()
         self._create_data_iterators()
         progress_bar = tqdm(
@@ -356,6 +364,11 @@ class VLATrainer(TrainerUtils):
             step_metrics = self._train_step(batch_vla)
             t_end_model = time.perf_counter()
 
+            # Run optimizer-step callbacks once, rather than once per microbatch.
+            # In particular, completed_steps stays zero during initial accumulation.
+            if not self.accelerator.sync_gradients:
+                continue
+
             if self.accelerator.sync_gradients:
                 progress_bar.update(1)
                 self.completed_steps += 1
@@ -370,6 +383,20 @@ class VLATrainer(TrainerUtils):
 
             if self.completed_steps % self.config.trainer.eval_interval == 0:
                 step_metrics = self.eval_action_model(step_metrics)
+
+            health_interval = self.config.trainer.get('health_check_interval', 0)
+            if health_interval and (self.completed_steps == 1 or self.completed_steps % health_interval == 0):
+                module = self.accelerator.unwrap_model(self.model)
+                health = module.training_health_check()
+                stop = torch.tensor(int(health['stop']), device=self.accelerator.device)
+                if dist.is_initialized():
+                    dist.all_reduce(stop, op=dist.ReduceOp.MAX)
+                if self.accelerator.is_main_process:
+                    with open(Path(self.config.output_dir) / 'health.jsonl', 'a') as handle:
+                        handle.write(json.dumps({'step': self.completed_steps, **health}) + '\n')
+                if stop.item():
+                    self._save_checkpoint()
+                    raise RuntimeError('Action decoder collapsed in two consecutive health checks; stopping')
 
             step_metrics["timing/data"] = t_end_data - t_start_data
             step_metrics["timing/model"] = t_end_model - t_start_model
@@ -420,8 +447,10 @@ class VLATrainer(TrainerUtils):
             with torch.autocast("cuda", dtype=torch.bfloat16):
                 output_dict = self.model.forward(batch_vla)
                 action_loss = output_dict["action_loss"]
-                total_loss = action_loss
+                total_loss = output_dict.get("total_loss", action_loss)
 
+            if not torch.isfinite(total_loss).all():
+                raise FloatingPointError("Training produced a non-finite loss")
             self.accelerator.backward(total_loss)
 
             if self.config.trainer.gradient_clipping is not None:
@@ -436,9 +465,20 @@ class VLATrainer(TrainerUtils):
             if self.accelerator.sync_gradients:
                 self.lr_scheduler.step()
 
-        return {
-            "action_dit_loss": action_loss.item(),
-        }
+        metrics = {"action_dit_loss": action_loss.item()}
+        if "fast_token_loss" in output_dict:
+            metrics.update(fast_token_loss=output_dict["fast_token_loss"].item(), total_loss=total_loss.item())
+        if "cot_loss" in output_dict:
+            metrics.update(cot_loss=output_dict["cot_loss"].item(), cot_samples=output_dict["cot_samples"].item(),
+                           total_loss=total_loss.item())
+        if hasattr(self.model, "get_global_grad_norm"):
+            norm = self.model.get_global_grad_norm()
+            if norm is not None:
+                norm = float(norm)
+                if not np.isfinite(norm):
+                    raise FloatingPointError("Training produced a non-finite gradient norm")
+                metrics["grad_norm"] = norm
+        return metrics
 
     def _finalize_training(self):
         """Training end processing."""
@@ -466,13 +506,34 @@ class VLATrainer(TrainerUtils):
         self.accelerator.wait_for_everyone()
 
 
+def configure_gradient_accumulation(cfg, training_accelerator):
+    accumulation = int(cfg.trainer.get("gradient_accumulation_steps", 1))
+    if accumulation < 1:
+        raise ValueError("gradient_accumulation_steps must be positive")
+    training_accelerator.gradient_accumulation_steps = accumulation
+    # This trainer counts optimizer updates and cycles its dataloader indefinitely.
+    training_accelerator.gradient_state.plugin_kwargs["sync_with_dataloader"] = False
+    if training_accelerator.distributed_type == DistributedType.DEEPSPEED:
+        # ZeRO-2 partitions gradients on every microbatch; its no_sync() is invalid.
+        # DeepSpeed itself decides when to update, while Accelerate counts those
+        # same boundaries for logging, checkpoints and LR scheduling.
+        training_accelerator.gradient_state.plugin_kwargs["sync_each_batch"] = True
+
+
 def main(cfg) -> None:
     logger.info("VLA Training :: Warming Up")
 
     cfg = wrap_config(cfg)
     logger.info("✅ Configuration wrapped for access tracking")
 
+    # The Accelerator is created before CLI config loading. Its default is one
+    # microbatch, even when the DeepSpeed JSON specifies a larger accumulation.
+    # Keep optimizer-step counters, callbacks and scheduler timing in agreement.
+    configure_gradient_accumulation(cfg, accelerator)
+
     output_dir = setup_directories(cfg=cfg)
+    if cfg.framework.get("knowledge_insulation", False):
+        set_seed(cfg.seed)
     vla = build_framework(cfg)
     vla_train_dataloader = prepare_data(cfg=cfg, accelerator=accelerator, output_dir=output_dir)
     optimizer, lr_scheduler = setup_optimizer_and_scheduler(model=vla, cfg=cfg)

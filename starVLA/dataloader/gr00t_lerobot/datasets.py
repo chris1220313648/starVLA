@@ -952,7 +952,6 @@ class LeRobotSingleDataset(Dataset):
                                 "chunk_index": int(episode[chunk_col]),
                                 "file_index": int(episode[file_col]),
                             }
-                    print(video_file_indices)
                     episode_meta = {
                         "data/chunk_index": episode["data/chunk_index"],
                         "data/file_index": episode["data/file_index"],
@@ -1317,10 +1316,19 @@ class LeRobotSingleDataset(Dataset):
         elif self._lerobot_version == "v3.0":
             tasks_path = self.dataset_path / LE_ROBOT3_TASKS_FILENAME
             df = pd.read_parquet(tasks_path)
-            df = df.reset_index()  # convert index to a column, typically named 'index'
-            df = df.rename(columns={'index': 'task'})  # rename 'index' column to 'task'
-            df = df[['task_index', 'task']]  # reorder columns
-            return df
+            # v3 exporters store text either as a column or as the index.
+            # Never rename a RangeIndex over an existing task column.
+            if "task" not in df.columns:
+                df = df.rename_axis("task").reset_index()
+            elif "task_index" not in df.columns:
+                df = df.reset_index()
+            if not {"task_index", "task"}.issubset(df.columns):
+                raise ValueError(f"Invalid task table: {tasks_path}")
+            if df["task_index"].duplicated().any() or not df["task"].map(
+                lambda value: isinstance(value, str) and bool(value.strip())
+            ).all():
+                raise ValueError(f"Duplicate task IDs or empty/non-text instructions: {tasks_path}")
+            return df.set_index("task_index")[["task"]]
     def _check_integrity(self):
         """Use the config to check if the keys are valid and detect silent data corruption."""
         ERROR_MSG_HEADER = f"Error occurred in initializing dataset {self.dataset_name}:\n"

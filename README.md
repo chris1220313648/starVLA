@@ -132,6 +132,19 @@ All variants share the same data interface and infrastructure; only the action h
 - [x] **StarVLA-PI**: Flow-Matching action expert for diffusion-based continuous actions (à la π₀).
 - [x] **StarVLA-GR00T**: Dual-system architecture — VLM as System 2, Flow-Matching as System 1 (à la GR00T).
 
+**GroundingPI backbone** supports three registered frameworks:
+
+| `framework.name` | Action paradigm | Example configuration |
+| --- | --- | --- |
+| `GroundingPIPI` | Layer-wise flow matching, reusing QwenPI | [PI](examples/modelExtensions/GroundingPI/train_files/groundingpipi.yaml) |
+| `GroundingPIOFT` | Parallel continuous action regression, reusing QwenOFT | [OFT](examples/modelExtensions/GroundingPI/train_files/groundingpioft.yaml) |
+| `GroundingPIFast` | Autoregressive FAST action tokens, reusing QwenFast | [FAST](examples/modelExtensions/GroundingPI/train_files/groundingpifast.yaml) |
+
+All three support multi-view images and have passed real-weight forward/backward,
+action inference, and checkpoint reload smoke tests. Robot-dataset training and task
+success evaluation have not been performed. See the [GroundingPI guide](examples/modelExtensions/GroundingPI/README.md)
+for the dedicated environment, official weights, and validation results.
+
 <p align="center">
 <img src="assets/starvla_variants.png" alt="StarVLA variant architectures" width="95%">
 </p>

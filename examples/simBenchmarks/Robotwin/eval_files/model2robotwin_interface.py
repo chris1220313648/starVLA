@@ -29,6 +29,9 @@ class ModelClient:
         port=5694,
         action_mode: str = "abs",
         normalization_mode: str = "min_max",
+        include_state: bool = False,
+        action_type: str = "qpos",
+        swap_red_blue: bool = False,
     ) -> None:
 
         self.client = WebsocketClientPolicy(host, port)
@@ -42,6 +45,11 @@ class ModelClient:
         self.use_ddim = use_ddim
         self.num_ddim_steps = num_ddim_steps
         self.image_size = image_size
+        self.swap_red_blue = swap_red_blue
+        self.include_state = include_state
+        if action_type not in ("qpos", "ee") or (action_type == "ee" and action_mode != "abs"):
+            raise ValueError("EEF client requires absolute ee actions")
+        self.action_type = action_type
         self.horizon = horizon
         self.action_ensemble = action_ensemble and (AdaptiveEnsembler is not None)
         self.adaptive_ensemble_alpha = adaptive_ensemble_alpha
@@ -68,6 +76,9 @@ class ModelClient:
 
         server_meta = self.client.get_server_metadata()
         self.action_chunk_size = server_meta["action_chunk_size"]
+        self.quaternion_order = server_meta.get("quaternion_order", "xyzw")
+        if self.quaternion_order not in ("xyzw", "wxyz"):
+            raise ValueError("Unsupported server quaternion_order")
         print(
             f"*** policy_setup: {policy_setup}, unnorm_key: {unnorm_key}, "
             f"action_mode: {action_mode}, normalization_mode: {normalization_mode}, "
@@ -104,6 +115,9 @@ class ModelClient:
 
         task_description = example.get("lang", None)
         images = example["image"]
+        # Compatibility only for checkpoints trained on PIL-decoded RoboTwin JPEGs.
+        if self.swap_red_blue:
+            images = [image[..., ::-1].copy() for image in images]
 
         if example is not None:
             if task_description != self.task_description:
@@ -112,10 +126,24 @@ class ModelClient:
                 if self.action_mode in ["delta", "rel"] and state is not None:
                     self.initial_state = np.array(state).copy()
 
-        images = [self._resize_image(image) for image in images]
-        example["image"] = images
+        if self.action_type == "ee":
+            from examples.simBenchmarks.Robotwin.robotwin_eef import compose_image
+            images = [np.asarray(compose_image(images))]
+        else:
+            images = [self._resize_image(image) for image in images]
         example_copy = example.copy()
-        example_copy.pop("state")
+        example_copy["image"] = images
+        example_copy.pop("state", None)
+        if self.include_state:
+            packed_state = np.asarray(state, dtype=np.float32)
+            if self.action_type == "ee":
+                if packed_state.shape != (20,):
+                    raise ValueError("Expected 20-D EEF state")
+                example_copy["state"] = packed_state[None]
+            else:
+                if packed_state.shape != (14,):
+                    raise ValueError(f"Expected RobotWin state (14,), got {packed_state.shape}")
+                example_copy["state"] = packed_state[[0, 1, 2, 3, 4, 5, 7, 8, 9, 10, 11, 12, 6, 13]][None]
         vla_input = {
             "examples": [example_copy],
             "do_sample": False,
@@ -159,6 +187,9 @@ class ModelClient:
         if self.action_mode == "delta":
             self.prev_action = current_action.copy()
 
+        if self.action_type == "ee":
+            from examples.simBenchmarks.Robotwin.robotwin_eef import to_ee16
+            return to_ee16(current_action, quaternion_order=self.quaternion_order)
         current_action = current_action[[0, 1, 2, 3, 4, 5, 12, 6, 7, 8, 9, 10, 11, 13]]
         return current_action
 
@@ -201,6 +232,10 @@ def get_model(usr_args):
         unnorm_key=unnorm_key,
         action_mode=action_mode,
         normalization_mode=normalization_mode,
+        image_size=usr_args.get("image_size", [224, 224]),
+        include_state=usr_args.get("include_state", False),
+        action_type=usr_args.get("action_type", "qpos"),
+        swap_red_blue=usr_args.get("swap_red_blue", False),
     )
 
 
@@ -220,7 +255,13 @@ def eval(TASK_ENV, model, observation):
     # Order: [head, left, right] to match training order
     images = [head_img, left_img, right_img]
 
-    state = observation["joint_action"]["vector"]
+    if model.action_type == "ee":
+        from examples.simBenchmarks.Robotwin.robotwin_eef import eef20
+        pose = observation["endpose"]
+        state = eef20(*(pose[key] for key in ("left_endpose", "right_endpose", "left_gripper", "right_gripper")),
+                      quaternion_order=model.quaternion_order)
+    else:
+        state = observation["joint_action"]["vector"]
     example = {
         "lang": str(instruction),
         "image": images,
@@ -230,4 +271,7 @@ def eval(TASK_ENV, model, observation):
     action = model.step(example, step=TASK_ENV.take_action_cnt)
 
     # Execute action
-    TASK_ENV.take_action(action)
+    if model.action_type == "ee":
+        TASK_ENV.take_action(action, action_type="ee")
+    else:
+        TASK_ENV.take_action(action)

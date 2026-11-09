@@ -1,0 +1,30 @@
+# Transformers is installed from the verified GroundingPI archive by setup.sh.
+torch==2.7.1
+torchvision==0.22.1
+accelerate==1.5.2
+numpy==1.26.4
+omegaconf==2.3.0
+diffusers==0.35.1
+einops
+scipy
+pillow
+rich
+wandb
+timm
+msgpack
+msgpack-numpy
+websockets
+pytest
+sentencepiece
+qwen-vl-utils
+# Existing LeRobot training pipeline (simulator environments remain separate).
+pandas>=2.2,<3
+pyarrow>=17,<20
+albumentations==1.4.18
+albucore==0.0.17
+opencv-python-headless<4.12
+numpydantic==1.6.9
+pydantic==2.10.6
+
+# Original RoboTwin HDF5 EEF20 reader.
+h5py>=3.11,<4

@@ -119,9 +119,12 @@ class PolicyServerWrapper:
     def _get_processor(self, unnorm_key: Optional[str]) -> PolicyNormProcessor:
         cache_key = unnorm_key if unnorm_key is not None else "__default__"
         if cache_key not in self._norm_processors:
-            self._norm_processors[cache_key] = PolicyNormProcessor(
-                self._ckpt_path, unnorm_key=unnorm_key
-            )
+            if self._model_cfg.get('datasets', {}).get('vla_data', {}).get('dataset_py') in ('robotwin_eef', 'robotwin_eef_lerobot'):
+                from examples.simBenchmarks.Robotwin.robotwin_eef import EEFNormProcessor
+                processor = EEFNormProcessor
+            else:
+                processor = PolicyNormProcessor
+            self._norm_processors[cache_key] = processor(self._ckpt_path, unnorm_key=unnorm_key)
         return self._norm_processors[cache_key]
 
     def get_norm_processor(self, unnorm_key: Optional[str] = None) -> PolicyNormProcessor:
@@ -146,6 +149,7 @@ class PolicyServerWrapper:
             "default_unnorm_key": self._default_unnorm_key,
             "training_data_mix": self._model_cfg.get("datasets", {}).get("vla_data", {}).get("data_mix"),
             "training_obs_image_size": _training_obs_image_size(self._model_cfg),
+            "quaternion_order": self._model_cfg.get("datasets", {}).get("vla_data", {}).get("quaternion_order", "xyzw"),
             "eval_image_contract": (
                 "Eval clients must explicitly choose image count and order. "
                 "The server does not infer or reorder camera views from training config."
@@ -186,6 +190,9 @@ class PolicyServerWrapper:
                     f"Pass one of {self._available_unnorm_keys}."
                 )
         proc = self._get_processor(effective_key)
+
+        if self._model_cfg.get('datasets', {}).get('vla_data', {}).get('normalize_state_on_server', False):
+            examples = [dict(example, state=proc.apply_state(example['state'])) for example in examples]
 
         out = self._framework.predict_action(examples=examples, **kwargs)
         normalized = np.asarray(out["normalized_actions"])  # (B, T, D)

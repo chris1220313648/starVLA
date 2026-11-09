@@ -1,7 +1,7 @@
 """RobotWin benchmark — data config, embodiment tags, and mixtures."""
 
 from starVLA.dataloader.gr00t_lerobot.datasets import ModalityConfig
-from starVLA.dataloader.gr00t_lerobot.transform.base import ComposedModalityTransform
+from starVLA.dataloader.gr00t_lerobot.transform.base import ComposedModalityTransform, ModalityTransform
 from starVLA.dataloader.gr00t_lerobot.transform.state_action import StateActionToTensor, StateActionTransform
 from starVLA.dataloader.gr00t_lerobot.embodiment_tags import EmbodimentTag
 
@@ -79,6 +79,28 @@ class AgilexData50Config(AgilexDataConfig):
         ])
 
 
+class GroundingPIRobotwinCleanV3Config(AgilexDataConfig):
+    """50 FPS, three cameras, 14-D normalized state and 16 absolute actions."""
+
+    def make_dataset(self, dataset_name, **kwargs):
+        from examples.simBenchmarks.Robotwin.train_files.robotwin_v3_dataset import RobotwinV3Dataset
+        return RobotwinV3Dataset(**kwargs)
+
+
+class ClipPI05State(ModalityTransform):
+    def apply(self, data):
+        for key in self.apply_to:
+            if key in data:
+                data[key] = data[key].clamp(-1, 1)
+        return data
+
+
+class GroundingPIPI05RobotwinConfig(GroundingPIRobotwinCleanV3Config):
+    def transform(self):
+        transforms = super().transform().transforms
+        return ComposedModalityTransform(transforms=[*transforms, ClipPI05State(apply_to=self.state_keys)])
+
+
 # ---------------------------------------------------------------------------
 # DataConfig — ARX X5
 # ---------------------------------------------------------------------------
@@ -121,6 +143,8 @@ class ArxX5DataConfig:
 
 
 ROBOT_TYPE_CONFIG_MAP = {
+    "groundingpi_pi05_robotwin": GroundingPIPI05RobotwinConfig(),
+    "groundingpi_robotwin_v3": GroundingPIRobotwinCleanV3Config(),
     "robotwin": AgilexDataConfig(),
     "robotwin50": AgilexData50Config(),
     "arx_x5": ArxX5DataConfig(),
@@ -136,6 +160,8 @@ ROBOT_TYPE_TO_EMBODIMENT_TAG = {
 # Mixtures
 # ---------------------------------------------------------------------------
 DATASET_NAMED_MIXTURES = {
+    "groundingpi_pi05_robotwin_clean": [("clean", 1.0, "groundingpi_pi05_robotwin")],
+    "groundingpi_v3_robotwin_clean": [("clean", 1.0, "groundingpi_robotwin_v3")],
     "robotwin_all": [
         ("Clean/adjust_bottle", 1.0, "robotwin"), ("Randomized/adjust_bottle", 1.0, "robotwin"),
         ("Clean/beat_block_hammer", 1.0, "robotwin"), ("Randomized/beat_block_hammer", 1.0, "robotwin"),

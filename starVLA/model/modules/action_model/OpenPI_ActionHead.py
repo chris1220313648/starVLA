@@ -19,6 +19,7 @@ class GemmaDims:
     num_heads: int
     num_kv_heads: int
     head_dim: int
+    vocab_size: int = 257152
 
 
 def create_sinusoidal_pos_embedding(
@@ -72,7 +73,7 @@ class OpenPIGemma(nn.Module):
             num_attention_heads=config.num_heads,
             num_hidden_layers=config.depth,
             num_key_value_heads=config.num_kv_heads,
-            vocab_size=257152,
+            vocab_size=config.vocab_size,
             hidden_activation="gelu_pytorch_tanh",
             torch_dtype="float32",
             use_adarms=bool(use_adarms),
@@ -258,7 +259,7 @@ class OpenPI0ActionHead(OpenPIActionHeadBase):
         )
         embs.append(action_time_emb)
         pad_masks.append(torch.ones(action_time_emb.shape[:2], dtype=torch.bool, device=action_time_emb.device))
-        att_masks += [1] + ([0] * (self.action_horizon - 1))
+        att_masks += [1] + ([0] * (action_time_emb.shape[1] - 1))
         embs = torch.cat(embs, dim=1)
         pad_masks = torch.cat(pad_masks, dim=1)
         att_masks = torch.tensor(att_masks, dtype=torch.bool, device=embs.device)[None, :]
@@ -285,6 +286,11 @@ class OpenPI05ActionHead(OpenPIActionHeadBase):
         ).to(self.time_mlp_in.weight.dtype)
         action_time_emb = self.action_in_proj(noisy_actions.to(self.action_in_proj.weight.dtype))
         adarms_cond = F.silu(self.time_mlp_out(F.silu(self.time_mlp_in(time_emb))))
+        if hasattr(self, 'state_encoder'):
+            if state is None or state.shape != (noisy_actions.shape[0], self.max_state_dim):
+                raise ValueError('Continuous state token requires state of shape (B,state_dim)')
+            state_emb = self.state_encoder(state.to(self.action_in_proj.weight.dtype))
+            action_time_emb = torch.cat((state_emb[:, None], action_time_emb), dim=1)
         pad_masks = torch.ones(action_time_emb.shape[:2], dtype=torch.bool, device=action_time_emb.device)
-        att_masks = torch.tensor([1] + ([0] * (self.action_horizon - 1)), dtype=torch.bool, device=action_time_emb.device)
+        att_masks = torch.tensor([1] + ([0] * (action_time_emb.shape[1] - 1)), dtype=torch.bool, device=action_time_emb.device)
         return action_time_emb, pad_masks, att_masks[None, :].expand(action_time_emb.shape[0], -1), adarms_cond

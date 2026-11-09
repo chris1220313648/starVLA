@@ -7,7 +7,7 @@ if [[ $# -lt 6 ]]; then
 fi
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
+REPO_ROOT="$(cd "${SCRIPT_DIR}/../../../.." && pwd)"
 
 ROBOTWIN_PATH="${ROBOTWIN_PATH:-/mnt/data/gaoning/code_repos/RoboTwin}"
 if [[ ! -d "${ROBOTWIN_PATH}" ]]; then
@@ -50,6 +50,9 @@ policy_ckpt_path="$6"
 policy_port="${7:-${ROBOTWIN_POLICY_PORT:-5694}}"
 policy_host="${8:-${ROBOTWIN_POLICY_HOST:-127.0.0.1}}"
 robotwin_python="${ROBOTWIN_PYTHON:-python}"
+# Explicit Python paths do not activate the environment for helpers such as ffmpeg.
+robotwin_python_bin="$(dirname "$(command -v "${robotwin_python}")")"
+export PATH="${robotwin_python_bin}:${PATH}"
 deploy_policy_template="${DEPLOY_POLICY_TEMPLATE_PATH:-${SCRIPT_DIR}/deploy_policy.yml}"
 
 if [[ ! -f "${deploy_policy_template}" ]]; then
@@ -69,6 +72,8 @@ sed \
     "${deploy_policy_template}" > "${runtime_deploy_policy}"
 
 export CUDA_VISIBLE_DEVICES="${gpu_id}"
+# Patched RoboTwin checkouts can abort unexpected setup failures with a traceback.
+export ROBOTWIN_FAIL_FAST_SETUP="${ROBOTWIN_FAIL_FAST_SETUP:-1}"
 echo -e "\033[33mgpu id (to use): ${gpu_id}\033[0m"
 
 EVAL_FILES_PATH="${SCRIPT_DIR}"

@@ -46,6 +46,7 @@ class Args:
     # Utils
     #################################################################################################################
     video_out_path: str = "experiments/libero/logs"  # Path to save videos
+    save_video: bool = os.environ.get("SIM_SAVE_VIDEO", "1") == "1"
     log_path: str = "experiments/libero/logs"
 
     seed: int = 7  # Random Seed (for reproducibility)
@@ -158,7 +159,8 @@ def eval_libero(args: Args) -> None:
                 wrist_img = np.ascontiguousarray(obs["robot0_eye_in_hand_image"][::-1, ::-1])
 
                 # Save preprocessed image for replay video
-                replay_images.append(img)
+                if args.save_video:
+                    replay_images.append(img)
 
                 state = np.concatenate(
                     (
@@ -230,12 +232,13 @@ def eval_libero(args: Args) -> None:
             suffix = "success" if done else "failure"
             task_segment = task_description.replace(" ", "_")
 
-            imageio.mimwrite(
-                pathlib.Path(args.video_out_path)
-                / f"rollout_{ID2CATEGORY[task_id+1][1]}_episode{episode_idx}_{suffix}.mp4",
-                [np.asarray(x) for x in replay_images],
-                fps=25,
-            )
+            if args.save_video:
+                imageio.mimwrite(
+                    pathlib.Path(args.video_out_path)
+                    / f"rollout_{ID2CATEGORY[task_id+1][1]}_episode{episode_idx}_{suffix}.mp4",
+                    [np.asarray(x) for x in replay_images],
+                    fps=25,
+                )
 
             full_actions = np.stack(full_actions)
             # np.save(pathlib.Path(args.video_out_path) / f"rollout_{task_segment}_episode{episode_idx}_{suffix}.npy", full_actions)

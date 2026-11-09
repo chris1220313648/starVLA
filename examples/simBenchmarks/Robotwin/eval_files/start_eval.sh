@@ -204,8 +204,12 @@ check_port_detection() {
 wait_for_server() {
     local port="$1"
     local timeout_s="${2:-600}"
+    local server_pid="${3:-}"
     local elapsed=0
     while (( elapsed < timeout_s )); do
+        if [[ -n "${server_pid}" ]] && ! kill -0 "${server_pid}" 2>/dev/null; then
+            return 1
+        fi
         if port_in_use "${port}"; then
             return 0
         fi
@@ -376,7 +380,7 @@ launch_task_in_slot() {
         bash "${SCRIPT_DIR}/run_policy_server.sh" "${CKPT_PATH}" "${gpu_id}" "${port}" > "${server_log}" 2>&1 &
         server_pid=$!
 
-        if ! wait_for_server "${port}" "${ROBOTWIN_SERVER_TIMEOUT:-600}"; then
+        if ! wait_for_server "${port}" "${ROBOTWIN_SERVER_TIMEOUT:-600}" "${server_pid}"; then
             echo "[ERROR] Policy server failed to become ready for task=${task_name} on port=${port}. See ${server_log}" >&2
             exit 1
         fi
@@ -481,6 +485,12 @@ fi
 check_port_detection
 
 prepare_runtime_dependencies
+
+# Check the bundled cuRobo API before allocating policy servers on every GPU.
+if ! "${ROBOTWIN_PYTHON}" -c 'import warp.torch'; then
+    echo "RoboTwin cuRobo requires warp.torch. Install eval_files/requirements.txt in the robotwin environment (warp-lang==1.8.0)." >&2
+    exit 1
+fi
 
 ckpt_name="$(basename "${CKPT_PATH}")"
 ckpt_stem="${ckpt_name%.*}"

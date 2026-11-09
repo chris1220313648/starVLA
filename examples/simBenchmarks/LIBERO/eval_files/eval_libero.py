@@ -15,6 +15,7 @@ from libero.libero.envs import OffScreenRenderEnv
 
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 from examples.simBenchmarks.LIBERO.eval_files.model2libero_interface import ModelClient
+from examples.simBenchmarks.LIBERO.eval_files.eval_sharding import episode_indices, summarize_records
 
 LIBERO_DUMMY_ACTION = [0.0] * 6 + [-1.0]
 LIBERO_ENV_RESOLUTION = 256  # resolution used to render training data
@@ -41,11 +42,14 @@ class Args:
     num_steps_wait: int = 10  # Number of steps to wait for objects to stabilize i n sim
     num_trials_per_task: int = 50  # Number of rollouts per task
     max_tasks: int = -1  # If > 0, limit the number of tasks evaluated (smoke / quick check). -1 = run all.
+    num_shards: int = 1
+    shard_id: int = 0
 
     #################################################################################################################
     # Utils
     #################################################################################################################
     video_out_path: str = "experiments/libero/logs"  # Path to save videos
+    save_video: bool = os.environ.get("SIM_SAVE_VIDEO", "1") == "1"
 
     seed: int = 7  # Random Seed (for reproducibility)
 
@@ -54,6 +58,8 @@ class Args:
     # Dataset key for un-normalization. None = auto (only if model trained on a single dataset).
     unnorm_key: str | None = None
 
+    image_resample: str = "bilinear"
+    include_state: bool = False
     post_process_action: bool = True
 
     job_name: str = "test"
@@ -61,6 +67,7 @@ class Args:
 
 def eval_libero(args: Args) -> None:
     logging.info(f"Arguments: {json.dumps(dataclasses.asdict(args), indent=4)}")
+    episode_indices(0, args.num_trials_per_task, args.num_shards, args.shard_id)
 
     # Set random seed
     np.random.seed(args.seed)
@@ -92,6 +99,7 @@ def eval_libero(args: Args) -> None:
         host=args.host,
         port=args.port,
         unnorm_key=args.unnorm_key,
+        image_resample=args.image_resample,
     )
 
     # Optional smoke-test cap (still useful for quick verification with -1 = full run).
@@ -100,19 +108,28 @@ def eval_libero(args: Args) -> None:
 
     # Start evaluation
     total_episodes, total_successes = 0, 0
+    records = []
+    record_path = pathlib.Path(args.video_out_path) / 'episodes.jsonl'
+    if record_path.exists():
+        raise FileExistsError(f'Refusing to overwrite rollout records: {record_path}')
     for task_id in tqdm.tqdm(range(n_eval_tasks)):
+        indices = episode_indices(task_id, args.num_trials_per_task, args.num_shards, args.shard_id)
+        if not indices:
+            continue
         # Get task
         task = task_suite.get_task(task_id)
 
         # Get default LIBERO initial states
         initial_states = task_suite.get_task_init_states(task_id)
+        if len(initial_states) < args.num_trials_per_task:
+            raise ValueError(f'Task {task_id} has only {len(initial_states)} initial states')
 
         # Initialize LIBERO environment and task description
         env, task_description = _get_libero_env(task, LIBERO_ENV_RESOLUTION, args.seed)
 
         # Start episodes
         task_episodes, task_successes = 0, 0
-        for episode_idx in tqdm.tqdm(range(args.num_trials_per_task)):
+        for episode_idx in tqdm.tqdm(indices):
             logging.info(f"\nTask: {task_description}")
 
             # Reset environment
@@ -146,7 +163,8 @@ def eval_libero(args: Args) -> None:
                 wrist_img = np.ascontiguousarray(obs["robot0_eye_in_hand_image"][::-1, ::-1])
 
                 # Save preprocessed image for replay video
-                replay_images.append(img)
+                if args.save_video:
+                    replay_images.append(img)
 
                 state = np.concatenate(
                     (
@@ -168,6 +186,9 @@ def eval_libero(args: Args) -> None:
                     "image": [observation["observation.primary"][0], observation["observation.wrist_image"][0]],
                     "lang": observation["instruction"][0],
                 }
+
+                if args.include_state:
+                    example_dict["state"] = observation["observation.state"].astype(np.float32)
 
                 start_time = time.time()
 
@@ -196,6 +217,8 @@ def eval_libero(args: Args) -> None:
                     )
                 else:
                     delta_action = np.concatenate([world_vector_delta, rotation_delta, gripper], axis=0)
+                if not np.isfinite(delta_action).all():
+                    raise ValueError('Policy returned non-finite actions')
 
                 full_actions.append(delta_action)
 
@@ -208,6 +231,8 @@ def eval_libero(args: Args) -> None:
                     break
                 t += 1
                 step += 1
+                if step % 100 == 0:
+                    logging.info(f'Task {task_id}, episode {episode_idx}: {step}/{max_steps} action steps')
 
             task_episodes += 1
             total_episodes += 1
@@ -215,13 +240,19 @@ def eval_libero(args: Args) -> None:
             # Save a replay video of the episode
             suffix = "success" if done else "failure"
             task_segment = task_description.replace(" ", "_")
-            imageio.mimwrite(
-                pathlib.Path(args.video_out_path) / f"rollout_{task_segment}_episode{episode_idx}_{suffix}.mp4",
-                [np.asarray(x) for x in replay_images],
-                fps=10,
-            )
+            if args.save_video:
+                imageio.mimwrite(
+                    pathlib.Path(args.video_out_path) / f"rollout_{task_segment}_episode{episode_idx}_{suffix}.mp4",
+                    [np.asarray(x) for x in replay_images],
+                    fps=10,
+                )
 
             full_actions = np.stack(full_actions)
+            record = dict(task_id=task_id, task=task_description, episode_idx=episode_idx,
+                          success=bool(done), steps=len(full_actions), shard_id=args.shard_id)
+            records.append(record)
+            with record_path.open('a') as handle:
+                handle.write(json.dumps(record) + '\n')
             # np.save(pathlib.Path(args.video_out_path) / f"rollout_{task_segment}_episode{episode_idx}_{suffix}.npy", full_actions)
 
             # print(pathlib.Path(args.video_out_path) / f"rollout_{task_segment}_episode{episode_idx}_{suffix}.mp4")
@@ -230,12 +261,19 @@ def eval_libero(args: Args) -> None:
             logging.info(f"# episodes completed so far: {total_episodes}")
             logging.info(f"# successes: {total_successes} ({total_successes / total_episodes * 100:.1f}%)")
 
+        env.close()
+
         # Log final results
         logging.info(f"Current task success rate: {float(task_successes) / float(task_episodes)}")
         logging.info(f"Current total success rate: {float(total_successes) / float(total_episodes)}")
 
-    logging.info(f"Total success rate: {float(total_successes) / float(total_episodes)}")
+    result = summarize_records(records, n_eval_tasks, args.num_trials_per_task, args.num_shards, args.shard_id)
+    logging.info(f"Total success rate: {result['success_rate']}")
     logging.info(f"Total episodes: {total_episodes}")
+    result.update(suite=args.task_suite_name, seed=args.seed, include_state=args.include_state,
+                  num_tasks=n_eval_tasks, trials_per_task=args.num_trials_per_task,
+                  num_shards=args.num_shards, shard_id=args.shard_id)
+    (pathlib.Path(args.video_out_path) / "result.json").write_text(json.dumps(result, indent=2))
 
 
 def _get_libero_env(task, resolution, seed):
