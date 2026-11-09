@@ -49,6 +49,7 @@ def main():
     parser.add_argument('--cot-root', type=Path, default=Path(
         '/share/project/robot-rfm/robot-processed-data/lerobot_v3_data/robotwin2.0_Lerobotv3_cot/clean/20261029_v1'))
     parser.add_argument('--cot-loss-weight', type=float, default=1.0)
+    parser.add_argument('--instruction-source', choices=('default', 'seen'), default='default')
     parser.add_argument('--raw-data', type=Path)
     parser.add_argument('--data-root', type=Path)
     parser.add_argument('--smoke-steps', type=int, default=3)
@@ -60,6 +61,8 @@ def main():
         parser.error('--dataset-root requires --eef')
     if args.with_cot and args.dataset_root is None:
         parser.error('--with-cot requires --dataset-root')
+    if args.instruction_source == 'seen' and args.dataset_root is None:
+        parser.error('--instruction-source seen requires --dataset-root')
     if args.image_input_mode == 'separate' and (not args.eef or args.dataset_root is None):
         parser.error('separate images require the pi05_eef LeRobot dataset')
     if not math.isfinite(args.cot_loss_weight) or args.cot_loss_weight <= 0:
@@ -142,7 +145,8 @@ def main():
             extra.append('--filter-static-segments')
         if args.dataset_root is not None:
             extra += ['--dataset-root', str(args.dataset_root), '--cot-root', str(args.cot_root),
-                      '--cot-loss-weight', str(args.cot_loss_weight), '--image-input-mode', args.image_input_mode]
+                      '--cot-loss-weight', str(args.cot_loss_weight), '--image-input-mode', args.image_input_mode,
+                      '--instruction-source', args.instruction_source]
             if args.with_cot:
                 extra.append('--with-cot')
         for name in ('raw_data', 'data_root'):
