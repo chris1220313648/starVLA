@@ -43,6 +43,7 @@ def main():
     parser.add_argument('--gpus', default='0,1,2,3,4,5,6,7')
     parser.add_argument('--cache-source', type=Path, default=CACHE_SOURCE)
     parser.add_argument('--check-cache', action='store_true')
+    parser.add_argument('--suites', nargs='+', choices=SUITES, default=list(SUITES))
     args = parser.parse_args()
     sys.path.insert(0, str(KIT / 'packages/roboscope-kit/src'))
     sys.path.insert(0, str(KIT / 'examples/groundingpi'))
@@ -57,7 +58,7 @@ def main():
 
     def check_cache():
         hashes = verify_cache(args.cache_source, ROBOTWIN_ALL_TASKS, revision(robotwin))
-        for suite in SUITES:
+        for suite in args.suites:
             validate_seed_cache_dir(args.cache_source/'seed-cache', suite, ROBOTWIN_ALL_TASKS, 20)
         return hashes
 
@@ -89,7 +90,7 @@ def main():
         for name, expected in hashes.items():
             if digest(args.output/name) != expected:
                 raise ValueError(f'Scene cache copy differs: {name}')
-        for suite in SUITES:
+        for suite in args.suites:
             validate_seed_cache_dir(args.output/'seed-cache', suite, ROBOTWIN_ALL_TASKS, 20)
         write_json(args.output/'seed-hashes.json', hashes)
         manifest = json.loads((args.cache_source/'manifest.json').read_text())
@@ -116,7 +117,7 @@ def main():
                    OPENBLAS_NUM_THREADS='1', MKL_NUM_THREADS='1', TOKENIZERS_PARALLELISM='false',
                    TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD='1', ROBOTWIN_SHARED_ENGINE='0',
                    GROUNDINGPI_VERIFY_PATH=marker, ROBOTWIN_INSTRUCTION_SEED_LIMIT='100')
-        for suite in SUITES:
+        for suite in args.suites:
             for smoke in (True, False):
                 name = f'{suite}-smoke' if smoke else suite
                 summary['state'] = name
@@ -158,7 +159,7 @@ def main():
     finally:
         stop_job_children(marker)
         write_json(args.output/'summary.json', summary)
-        lines = ['# Shared-CoT RGB RoboScope evaluation', '', f"State: {summary['state']}", '',
+        lines = ['# GroundingPI RGB RoboScope evaluation', '', f"State: {summary['state']}", '',
                  f'Checkpoint: `{args.checkpoint}`', '', f'Cached scenes: `{args.cache_source}`', '',
                  'Local protocol; not official benchmark scores.', '',
                  '| Suite | Task | Successes | Episodes | Rate |', '|---|---|---:|---:|---:|']

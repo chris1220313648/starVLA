@@ -37,6 +37,7 @@ def main():
     parser.add_argument('--gpus', default='0,1,2,3,4,5,6,7')
     parser.add_argument('--steps', type=int, default=10000)
     parser.add_argument('--batch-size', type=int, choices=(1,2,4,8,16), default=16)
+    parser.add_argument('--strict-batch', action='store_true', help='Stop on OOM instead of reducing the microbatch')
     parser.add_argument('--knowledge-insulation', action='store_true')
     parser.add_argument('--color-jitter', type=float, default=0.0)
     parser.add_argument('--filter-static-segments', action='store_true')
@@ -177,7 +178,7 @@ def main():
                 (output / f'smoke_b{batch}_train.log').write_text(detail)
                 state['attempts'].append(dict(stage='smoke', batch_size=batch, exit_code=code))
                 if code:
-                    if is_oom(detail + log.read_text()):
+                    if is_oom(detail + log.read_text()) and not args.strict_batch:
                         batch //= 2
                         continue
                     raise RuntimeError(f'Smoke training failed at batch {batch}')
@@ -197,7 +198,7 @@ def main():
             state['attempts'].append(dict(stage='train', batch_size=batch, exit_code=code))
             if code:
                 detail = (run_dir / 'train.log').read_text() if (run_dir / 'train.log').exists() else ''
-                if is_oom(detail + log.read_text()):
+                if is_oom(detail + log.read_text()) and not args.strict_batch:
                     batch //= 2
                     continue
                 raise RuntimeError('Formal training failed')
