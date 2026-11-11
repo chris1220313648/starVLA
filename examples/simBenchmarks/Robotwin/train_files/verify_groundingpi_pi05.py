@@ -45,7 +45,7 @@ def main():
     action_cfg = cfg.framework.action_model
     expected_dim = 20 if eef else 14
     assert action_cfg.state_dim == expected_dim and action_cfg.action_dim == expected_dim
-    expected_image_count = 3 if separate or not eef else 1
+    expected_image_count = 5 if cfg.datasets.vla_data.get('history_frames', 0) else 3 if separate or not eef else 1
     expected_image_size = (320,240) if separate else (320,384) if eef else (224,224)
     assert all(len(s['image']) == expected_image_count and
                all(im.size == expected_image_size for im in s['image']) for s in samples)

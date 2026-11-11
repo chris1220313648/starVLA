@@ -355,6 +355,7 @@ class VLATrainer(TrainerUtils):
             disable=not self.accelerator.is_local_main_process,
         )
 
+        optimizer_started = time.perf_counter()
         while self.completed_steps < self.config.trainer.max_train_steps:
             t_start_data = time.perf_counter()
             batch_vla = self._get_next_batch()
@@ -398,9 +399,16 @@ class VLATrainer(TrainerUtils):
                     self._save_checkpoint()
                     raise RuntimeError('Action decoder collapsed in two consecutive health checks; stopping')
 
+            step_metrics['timing/optimizer_step'] = time.perf_counter() - optimizer_started
+            peak_fraction = torch.tensor(torch.cuda.max_memory_reserved() / torch.cuda.get_device_properties(self.accelerator.device).total_memory,
+                                         device=self.accelerator.device)
+            if dist.is_initialized():
+                dist.all_reduce(peak_fraction, op=dist.ReduceOp.MAX)
+            step_metrics['memory/peak_fraction'] = peak_fraction.item()
             step_metrics["timing/data"] = t_end_data - t_start_data
             step_metrics["timing/model"] = t_end_model - t_start_model
             self._log_metrics(step_metrics)
+            optimizer_started = time.perf_counter()
 
             if self.completed_steps % self.config.trainer.save_interval == 0 and self.completed_steps > 0:
                 self._save_checkpoint()

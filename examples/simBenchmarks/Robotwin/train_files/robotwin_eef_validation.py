@@ -20,7 +20,10 @@ def validate(args):
         dataset_class = RobotwinEEFLeRobotDataset
     dataset = dataset_class(config(args).datasets.vla_data, training=False)
     separate = getattr(args, 'image_input_mode', 'composite') == 'separate'
-    expected_images = 3 if separate else 1
+    history_cfg = config(args).datasets.vla_data
+    history = int(history_cfg.get('history_frames', 0))
+    history_contract = dict(frames=history, stride=int(history_cfg.get('history_stride', 40)), include_first=True, pad='current', cot_target='current') if history else None
+    expected_images = 5 if history else 3 if separate else 1
     expected_size = (320, 240) if separate else (320, 384)
     expected_cot_frame = 'head_camera_320x240_v1' if separate else 'composite_320x384_v1'
     # Include episode tails to check padding/masking as well as starts.
@@ -45,7 +48,7 @@ def validate(args):
         raise ValueError(f'Expected {expected_images} equally sized image token grids, got {tokens}')
     write_json(validation_path(args), dict(passed=True, manifest=manifest, tasks=counts,
         sampled_episodes=len(chosen), visual_tokens=tokens,
-        model_contract=dict(image_size=[240, 320] if separate else [384, 320], image_count=expected_images,
+        model_contract=dict(history=history_contract, image_size=[240, 320] if separate else [384, 320], image_count=expected_images,
                             image_layout='head_left_wrist_right_separate' if separate else 'head_top_wrists_bottom',
                             cot_coordinate_frame=expected_cot_frame if args.with_cot else None,
                             state_shape=[1, 20], action_shape=[32, 20])))

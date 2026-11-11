@@ -36,10 +36,13 @@ def main():
     parser.add_argument('--output', type=Path, required=True, help='Fresh experiment directory')
     parser.add_argument('--gpus', default='0,1,2,3,4,5,6,7')
     parser.add_argument('--steps', type=int, default=10000)
+    parser.add_argument('--save-interval', type=int, default=1000)
     parser.add_argument('--batch-size', type=int, choices=(1,2,4,8,16), default=16)
+    parser.add_argument('--config-yaml', type=Path)
+    parser.add_argument('--tune-batch', action='store_true', help='Benchmark all fitting microbatches at fixed effective batch')
     parser.add_argument('--strict-batch', action='store_true', help='Stop on OOM instead of reducing the microbatch')
     parser.add_argument('--knowledge-insulation', action='store_true')
-    parser.add_argument('--color-jitter', type=float, default=0.0)
+    parser.add_argument('--color-jitter', type=float, default=None)
     parser.add_argument('--filter-static-segments', action='store_true')
     parser.add_argument('--eef', action='store_true', help='EEF20, continuous expert state, 32 actions, 384x320 composed image')
     parser.add_argument('--dataset-root', type=Path)
@@ -56,6 +59,11 @@ def main():
     parser.add_argument('--train-port', type=int, default=29615)
     parser.add_argument('--workers', type=int, default=2)
     args = parser.parse_args()
+    if args.color_jitter is None:
+        from omegaconf import OmegaConf
+        args.color_jitter = float(OmegaConf.load(args.config_yaml).datasets.vla_data.get('color_jitter', 0.0)) if args.config_yaml else 0.0
+    if args.tune_batch and (not args.eef or args.smoke_steps < 20):
+        parser.error('--tune-batch requires --eef and --smoke-steps >=20')
     import math
     if args.dataset_root is not None and not args.eef:
         parser.error('--dataset-root requires --eef')
@@ -78,6 +86,8 @@ def main():
         parser.error('GPU IDs must be unique integers')
     if args.steps < 1 or args.smoke_steps < 3 or args.workers < 0:
         parser.error('steps must be positive, smoke-steps >=3 and workers >=0')
+    if args.save_interval < 1:
+        parser.error('--save-interval must be positive')
     output = args.output.resolve()
     output.mkdir(parents=True, exist_ok=False)
     (output / 'launch_args.json').write_text(json.dumps(vars(args), default=str, indent=2) + '\n')
@@ -140,6 +150,8 @@ def main():
 
     def training_command(dest, batch, smoke=False):
         extra = []
+        if args.config_yaml:
+            extra += ['--config-yaml', str(args.config_yaml.resolve())]
         extra += ['--color-jitter', str(args.color_jitter)]
         if args.filter_static_segments:
             extra.append('--filter-static-segments')
@@ -161,7 +173,7 @@ def main():
                 '--workers', str(args.workers), '--train-port', str(args.train_port),
                 '--num-warmup-steps', str(1 if smoke else min(500, max(1,args.steps//10))),
                 '--health-check-interval', str(1 if smoke else 100),
-                '--save-interval', str(args.smoke_steps if smoke else 1000),
+                '--save-interval', str(args.smoke_steps if smoke else args.save_interval),
                 '--output', str(dest)] + extra + (['--knowledge-insulation'] if args.knowledge_insulation else [])
 
     try:
@@ -172,9 +184,47 @@ def main():
         if code:
             raise RuntimeError('Data validation failed; see validation.log')
         batch = args.batch_size
+        if args.tune_batch:
+            import statistics
+            candidates = []
+            probe = batch
+            while probe:
+                save(status='benchmarking', batch_size=probe)
+                with tempfile.TemporaryDirectory(prefix='robotwin_pi05_benchmark_', dir=output) as temp:
+                    smoke = Path(temp) / 'run'
+                    log = output / f'benchmark_b{probe}.log'
+                    code = run(training_command(smoke, probe, smoke=True), log)
+                    detail = (smoke / 'train.log').read_text() if (smoke / 'train.log').exists() else ''
+                    (output / f'benchmark_b{probe}_train.log').write_text(detail)
+                    if code:
+                        state['attempts'].append(dict(stage='benchmark', batch_size=probe, exit_code=code))
+                        if not is_oom(detail + log.read_text()):
+                            raise RuntimeError(f'Batch benchmark failed at {probe}; see logs')
+                    else:
+                        metrics = [json.loads(line) for line in (smoke / 'metrics.jsonl').read_text().splitlines()]
+                        for filename in ('metrics.jsonl', 'health.jsonl'):
+                            shutil.copy2(smoke / filename, output / f'benchmark_b{probe}_{filename}')
+                        measured = [row for row in metrics if row['step'] > 5]
+                        if len(measured) < 15:
+                            raise RuntimeError('Benchmark requires at least 15 measured optimizer steps')
+                        record = dict(batch_size=probe,
+                                      samples_per_second=args.batch_size * len(gpus) / statistics.median(row['timing/optimizer_step'] for row in measured),
+                                      peak_memory_fraction=max(row['memory/peak_fraction'] for row in metrics))
+                        state['attempts'].append(dict(stage='benchmark', exit_code=0, **record))
+                        if record['peak_memory_fraction'] <= .9:
+                            candidates.append(record)
+                    save()
+                probe //= 2
+            if not candidates:
+                raise RuntimeError('No batch passed with 10% memory headroom')
+            best_speed = max(row['samples_per_second'] for row in candidates)
+            chosen = min((row for row in candidates if row['samples_per_second'] >= best_speed * .97),
+                         key=lambda row: row['peak_memory_fraction'])
+            batch = chosen['batch_size']
+            save(status='batch_selected', selected_batch=chosen)
         while batch:
             save(status='smoke_training', batch_size=batch)
-            with tempfile.TemporaryDirectory(prefix='robotwin_pi05_smoke_') as temp:
+            with tempfile.TemporaryDirectory(prefix='robotwin_pi05_smoke_', dir=output) as temp:
                 smoke = Path(temp) / 'run'
                 log = output / f'smoke_b{batch}.log'
                 code = run(training_command(smoke, batch, smoke=True), log)

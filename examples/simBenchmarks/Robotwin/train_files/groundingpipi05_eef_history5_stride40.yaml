@@ -1,0 +1,80 @@
+run_id: groundingpipi05_eef_cot01_seen100_history5_stride40
+run_root_dir: playground/Checkpoints
+seed: 42
+is_debug: false
+wandb_project: groundingpi
+wandb_entity: null
+version_id: '0.21'
+framework:
+  name: GroundingPIPI05
+  qwenvl:
+    backbone: groundingpi
+    base_vlm: playground/Pretrained_models/GroundingPI
+    attn_implementation: sdpa
+    enable_gradient_checkpointing: true
+  action_model:
+    action_dim: 20
+    state_dim: 20
+    action_horizon: 32
+    expert_width: 1024
+    expert_mlp_dim: 4096
+    num_inference_steps: 10
+    state_representation: continuous_expert_token
+datasets:
+  vla_data:
+    dataset_py: robotwin_eef
+    data_root_dir: /share/project/robot-rfm/robot-processed-data/robotwin_eef20_h32_v1
+    data_mix: groundingpi_pi05_robotwin_eef_clean
+    include_state: true
+    normalize_state_on_server: true
+    action_type: eef
+    action_mode: abs
+    load_all_data_for_training: true
+    per_device_batch_size: 4
+    obs_image_size:
+    - 384
+    - 320
+    image_size:
+    - 384
+    - 320
+    video_backend: pyav
+    state_action_dtype: float32
+    num_workers: 2
+    balance_dataset_weights: true
+    raw_data_dir: /share/project/robot-rfm/robot-raw-data/RoboTwin2.0/dataset
+    image_layout: head_top_wrists_bottom
+    color_jitter: 0.2
+    filter_static_segments: false
+    static_segment_threshold: 1.0e-05
+    max_static_retry: 3
+    history_frames: 4
+    history_stride: 40
+trainer:
+  max_train_steps: 50000
+  num_warmup_steps: 500
+  health_check_interval: 100
+  save_interval: 5000
+  eval_interval: 1000000000
+  learning_rate:
+    base: 1.0e-05
+    qwen_vl_interface: 1.0e-05
+    action_model: 0.0001
+  freeze_modules: ''
+  loss_scale:
+    vla: 1.0
+    vlm: 0.0
+  gradient_accumulation_steps: 4
+  gradient_checkpointing: true
+  max_grad_norm: 1.0
+  lr_scheduler_type: cosine
+  scheduler_specific_kwargs: {}
+  gradient_clipping: 1.0
+  optimizer:
+    name: AdamW
+    betas:
+    - 0.9
+    - 0.95
+    eps: 1.0e-08
+    weight_decay: 0.0
+  weight_decay: 0.0
+  logging_frequency: 10

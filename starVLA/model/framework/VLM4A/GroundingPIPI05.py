@@ -57,10 +57,12 @@ class GroundingPIPI05(baseframework):
         if self.cot_loss_weight and self.knowledge_insulation:
             raise ValueError('CoT supervision and knowledge insulation cannot be combined')
         self.cot_training_mode = str(self.config.framework.get('cot_training_mode', 'legacy'))
-        if self.cot_training_mode not in ('legacy', 'shared_canvas_v1', 'separate_head_v1'):
+        if self.cot_training_mode not in ('legacy', 'shared_canvas_v1', 'history_canvas_v1', 'separate_head_v1'):
             raise ValueError('Unsupported cot_training_mode')
+        self.config.datasets.vla_data.get('history_frames', 0)
+        self.config.datasets.vla_data.get('history_stride', 40)
         self.cot_prompt = str(self.config.framework.get('cot_prompt', ''))
-        if self.cot_training_mode == 'shared_canvas_v1' and (not self.cot_loss_weight or not self.cot_prompt.strip()):
+        if self.cot_training_mode in ('shared_canvas_v1', 'history_canvas_v1') and (not self.cot_loss_weight or not self.cot_prompt.strip()):
             raise ValueError('Shared canvas CoT requires a positive loss weight and a prompt')
         self.state_representation = str(cfg.get('state_representation', 'discrete_text'))
         if self.state_representation not in ('discrete_text', 'continuous_expert_token'):
@@ -140,7 +142,7 @@ class GroundingPIPI05(baseframework):
         prompts = ([f'Task: {str(e["lang"]).strip()};\nAction: ' for e in examples]
                    if self.continuous_state else
                    [state_prompt(e['lang'], e['state'], self.state_dim) for e in examples])
-        if self.cot_training_mode == 'shared_canvas_v1':
+        if self.cot_training_mode in ('shared_canvas_v1', 'history_canvas_v1'):
             prompts = [prompt.removesuffix('Action: ') + self.cot_prompt for prompt in prompts]
         return prompts
 
@@ -150,9 +152,10 @@ class GroundingPIPI05(baseframework):
         if any(not e['image'] for e in examples):
             raise ValueError('Each example requires images')
         images = to_pil_preserve([e['image'] for e in examples])
-        if self.cot_training_mode == 'shared_canvas_v1':
-            if any(len(views) != 1 or views[0].size != (320, 384) for views in images):
-                raise ValueError('Shared canvas CoT requires one 320x384 composite per sample')
+        if self.cot_training_mode in ('shared_canvas_v1', 'history_canvas_v1'):
+            count = 5 if self.cot_training_mode == 'history_canvas_v1' else 1
+            if any(len(views) != count or any(im.size != (320, 384) for im in views) for views in images):
+                raise ValueError(f'Canvas CoT requires {count} 320x384 composites per sample')
         elif self.cot_training_mode == 'separate_head_v1':
             if any(len(views) != 3 or any(image.size != (320, 240) for image in views) for views in images):
                 raise ValueError('Separate-view CoT requires three 320x240 images per sample')
@@ -339,9 +342,9 @@ class GroundingPIPI05(baseframework):
         return local_loss, samples
 
     def _cot_velocity(self, examples, noisy, time):
-        if self.cot_training_mode not in ('shared_canvas_v1', 'separate_head_v1'):
+        if self.cot_training_mode not in ('shared_canvas_v1', 'history_canvas_v1', 'separate_head_v1'):
             raise ValueError('CoT training requires an explicit coordinate-aware mode')
-        coordinate_frame = ('composite_320x384_v1' if self.cot_training_mode == 'shared_canvas_v1'
+        coordinate_frame = ('composite_320x384_v1' if self.cot_training_mode in ('shared_canvas_v1', 'history_canvas_v1')
                             else 'head_camera_320x240_v1')
         if any(e.get('cot') and e.get('cot_coordinate_frame') != coordinate_frame for e in examples):
             raise ValueError(f'CoT labels must use {coordinate_frame} coordinates')

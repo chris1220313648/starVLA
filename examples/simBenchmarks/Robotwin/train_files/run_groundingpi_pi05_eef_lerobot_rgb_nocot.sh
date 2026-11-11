@@ -8,7 +8,7 @@ SDK_PYTHON="${SDK_PYTHON:-$WORKSPACE/envs/roboscope-kit/bin/python}"
 OUTPUT_PATH="${OUTPUT_PATH:-$REPO_ROOT/playground/Checkpoints/groundingpipi05_eef20_h32_nocot_rgb_w8_$(date -u +%Y%m%d_%H%M%S)}"
 GPUS="${GPUS:-0,1,2,3,4,5,6,7}"
 cd "$REPO_ROOT"
-"$SDK_PYTHON" "$HERE/evaluate_groundingpi_cached.py" --check-cache --suites demo_clean
+"$SDK_PYTHON" "$HERE/../eval_files/evaluate_groundingpi_cached.py" --check-cache --suites demo_clean
 "$STARVLA_PYTHON" "$HERE/run_groundingpi_pi05_pipeline.py" \
   --eef --steps 50000 --batch-size 16 --strict-batch --workers 8 --gpus "$GPUS" \
   --dataset-root /share/project/robot-rfm/robot-processed-data/lerobot_v3_data/robotwin2.0_EEF20_RGB_Lerobotv3 \
@@ -16,7 +16,7 @@ cd "$REPO_ROOT"
   --image-input-mode composite --color-jitter 0 --train-port 29645 \
   --train-only --output "$OUTPUT_PATH"
 CHECKPOINT="$OUTPUT_PATH/train_b16/final_model/pytorch_model.pt"
-"$SDK_PYTHON" "$HERE/evaluate_groundingpi_cached.py" \
+"$SDK_PYTHON" "$HERE/../eval_files/evaluate_groundingpi_cached.py" \
   --checkpoint "$CHECKPOINT" --output "$OUTPUT_PATH/eval" --gpus "$GPUS" --suites demo_clean
 "$STARVLA_PYTHON" - "$OUTPUT_PATH" <<'PY'
 import json

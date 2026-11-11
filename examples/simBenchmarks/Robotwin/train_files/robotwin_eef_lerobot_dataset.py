@@ -135,6 +135,9 @@ class CoTAnnotations:
             self.mapping[int(source['episode_index'])] = int(row['episode_index'])
         if len(set(self.mapping.values())) != len(sources):
             raise ValueError('CoT mapping must be one-to-one')
+        self.annotation_root = self.dataset / 'annotations'
+        if not self.annotation_root.is_dir():
+            self.annotation_root = self.root / 'shared/annotations'
         self.answers = ShardCache(['episode_index', 'frame_index', 'index', 'annotation.cot', 'annotation.cot_available'])
         self.qc = ShardCache(['episode_index', 'frame_index', 'index', 'metadata_json', 'target_only_metadata_json'])
 
@@ -143,7 +146,7 @@ class CoTAnnotations:
         meta = self.episodes[cot_id]
         relative = self.info['data_path'].format(chunk_index=int(meta['data/chunk_index']), file_index=int(meta['data/file_index']))
         row = self.answers.episode(self.dataset / relative, cot_id).iloc[frame]
-        qc = self.qc.episode(self.dataset / 'annotations' / relative, cot_id).iloc[frame]
+        qc = self.qc.episode(self.annotation_root / relative, cot_id).iloc[frame]
         identity = (cot_id, frame, int(meta['dataset_from_index']) + frame)
         for value in (row, qc):
             if tuple(int(value[k]) for k in ('episode_index', 'frame_index', 'index')) != identity:
@@ -166,7 +169,7 @@ class CoTAnnotations:
             ep = self.episodes[cot_id]
             relative = self.info['data_path'].format(chunk_index=int(ep['data/chunk_index']), file_index=int(ep['data/file_index']))
             rows = self.answers.episode(self.dataset / relative, cot_id)
-            qc = identities.episode(self.dataset / 'annotations' / relative, cot_id)
+            qc = identities.episode(self.annotation_root / relative, cot_id)
             for table in (rows, qc):
                 np.testing.assert_array_equal(table.frame_index, np.arange(int(ep['length'])))
                 np.testing.assert_array_equal(table['index'], np.arange(int(ep['dataset_from_index']), int(ep['dataset_from_index']) + int(ep['length'])))
@@ -306,6 +309,13 @@ def prepare(dataset_root, cache_root, cot_root=None, image_input_mode='composite
         return result
 
 
+def image_frame_indices(frame, history_frames=0, history_stride=40):
+    if history_frames == 0:
+        return [frame]
+    return [0] + [frame - offset if frame >= offset else frame
+                  for offset in range((history_frames - 1) * history_stride, -1, -history_stride)]
+
+
 class RobotwinEEFLeRobotDataset(Dataset):
     def __init__(self, data_cfg, training=True):
         self.data_cfg, self.training = data_cfg, training
@@ -323,6 +333,12 @@ class RobotwinEEFLeRobotDataset(Dataset):
         self.retries = int(getattr(data_cfg, 'max_static_retry', 3))
         if not 0 <= self.color_jitter <= 1 or self.threshold <= 0 or self.retries < 0:
             raise ValueError('Invalid augmentation/resampling settings')
+        self.history_frames = int(getattr(data_cfg, 'history_frames', 0))
+        self.history_stride = int(getattr(data_cfg, 'history_stride', 40))
+        if self.history_frames not in (0, 4) or self.history_stride <= 0:
+            raise ValueError('History requires four window frames and a positive stride')
+        if self.history_frames and getattr(data_cfg, 'image_input_mode', 'composite') != 'composite':
+            raise ValueError('History requires composite images')
         self.cot = None
         if self.index['cot_root']:
             source = Path(self.index['source']) / 'source_episodes.jsonl'
@@ -364,12 +380,19 @@ class RobotwinEEFLeRobotDataset(Dataset):
                     window = candidate
                     break
         ep, frame, rows = window
-        images = [Image.fromarray(get_frames_by_timestamps(ep['videos'][cam]['path'],
-                  [ep['videos'][cam]['start'] + frame / 50], video_backend='pyav')[0]) for cam in CAMERAS]
+        indices = image_frame_indices(frame, self.history_frames, self.history_stride)
+        unique = sorted(set(indices))
+        decoded = {cam: get_frames_by_timestamps(ep['videos'][cam]['path'],
+                   [ep['videos'][cam]['start'] + step / 50 for step in unique], video_backend='pyav')
+                   for cam in CAMERAS}
+        frames = {step: [Image.fromarray(decoded[cam][i]) for cam in CAMERAS]
+                  for i, step in enumerate(unique)}
         if self.image_input_mode == 'separate':
-            image_sample = [image.convert('RGB').resize((320, 240), Image.Resampling.BILINEAR) for image in images]
+            image_sample = [image.convert('RGB').resize((320, 240), Image.Resampling.BILINEAR)
+                            for image in frames[frame]]
         else:
-            image_sample = [compose_image(images)]
+            composites = {step: compose_image(images) for step, images in frames.items()}
+            image_sample = [composites[step] for step in indices]
         if self.training and self.color_jitter:
             for enhance in (ImageEnhance.Brightness, ImageEnhance.Contrast, ImageEnhance.Color):
                 factor = random.uniform(1-self.color_jitter, 1+self.color_jitter)

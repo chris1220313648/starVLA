@@ -233,7 +233,7 @@ def test_rgb_transition_tables_keep_last_sample_and_next_pose(sources, single_ro
 
 
 def test_cached_scene_manifest_rejects_changed_missing_and_wrong_revision(tmp_path):
-    from examples.simBenchmarks.Robotwin.train_files.evaluate_groundingpi_cached import digest, verify_cache
+    from examples.simBenchmarks.Robotwin.eval_files.evaluate_groundingpi_cached import digest, verify_cache
     tasks=['task_a','task_b'];hashes={}
     write_json(tmp_path/'provenance.json',{'revisions':{'robotwin':'fixed'}})
     for suite in ['demo_clean','demo_randomized']:
@@ -569,3 +569,83 @@ def test_new_client_uses_server_wxyz_metadata(monkeypatch):
     client.eval(Environment(),model,observation)
     np.testing.assert_allclose(requests[0]['examples'][0]['state'],action[None])
     np.testing.assert_allclose(executed[0][3:7],pose[3:7])
+
+
+@pytest.mark.parametrize('frame,expected', [
+    (0, [0,0,0,0,0]), (39, [0,39,39,39,39]), (40, [0,40,40,0,40]),
+    (50, [0,50,50,10,50]), (80, [0,80,0,40,80]),
+    (119, [0,119,39,79,119]), (120, [0,0,40,80,120]),
+    (160, [0,40,80,120,160]),
+])
+def test_history_frame_indices(frame, expected):
+    from examples.simBenchmarks.Robotwin.train_files.robotwin_eef_lerobot_dataset import image_frame_indices
+    assert image_frame_indices(frame, 4, 40) == expected
+    assert image_frame_indices(frame) == [frame]
+
+
+def test_history_loading_and_shared_color_jitter(sources, monkeypatch):
+    root, cot, cache = sources
+    prepare(root, cache, cot)
+    cfg = SimpleNamespace(data_root_dir=cache, history_frames=4, history_stride=40, color_jitter=.2)
+    plain = RobotwinEEFLeRobotDataset(cfg, training=False)
+    augmented = RobotwinEEFLeRobotDataset(cfg, training=True)
+    calls = []
+    def uniform(low, high):
+        calls.append((low, high))
+        return 1.15
+    monkeypatch.setattr(random, 'uniform', uniform)
+    reference = plain[3]
+    assert calls == []
+    row = augmented[3]  # The second episode must start with its own first frame.
+    assert len(calls) == 3 and calls == [(.8, 1.2)] * 3
+    assert len(row['image']) == 5 and row['episode_index'] == reference['episode_index']
+    assert all(image.mode == 'RGB' and image.size == (320,384) for image in row['image'])
+    assert all(np.array_equal(row['image'][0], image) for image in row['image'])
+    assert not np.array_equal(row['image'][0], reference['image'][0])
+    assert row['cot'] == reference['cot']
+    np.testing.assert_array_equal(row['state'], reference['state'])
+    np.testing.assert_array_equal(row['action'], reference['action'])
+
+
+def test_history_cot_prefix_and_backward(cot_model):
+    cot_model.cot_training_mode = 'history_canvas_v1'
+    row = sample()
+    row['image'] *= 5
+    output = shared_output(cot_model, [row])
+    (output['action_loss'] + output['cot_loss']).backward()
+    assert torch.isfinite(output['cot_loss'])
+    row['image'] = row['image'][:4]
+    with pytest.raises(ValueError, match='5 320x384'):
+        cot_model.prepare_prefix([row])
+
+
+def test_shared_annotation_delivery_layout(sources):
+    import shutil
+    root, cot, cache = sources
+    shutil.move(str(cot/'datasets/groundingpi_target_only/annotations/data'), str(cot/'shared/annotations/data'))
+    (cot/'datasets/groundingpi_target_only/annotations').rmdir()
+    prepare(root, cache, cot)
+    dataset = RobotwinEEFLeRobotDataset(SimpleNamespace(data_root_dir=cache), training=False)
+    assert dataset[0]['cot'] == MAPPED_BBOX
+
+
+def test_history_decoder_timestamps_and_order(sources, monkeypatch):
+    from starVLA.dataloader.gr00t_lerobot import video
+    root, cot, cache = sources
+    prepare(root, cache)
+    dataset = RobotwinEEFLeRobotDataset(SimpleNamespace(data_root_dir=cache, history_frames=4, history_stride=40), training=False)
+    ep, _, rows = dataset._window(0)
+    ep = dict(ep, length=201, sample_length=201)
+    rows = pd.concat([rows.iloc[:1]] * 201, ignore_index=True)
+    monkeypatch.setattr(dataset, '_window', lambda index: (ep, 160, rows))
+    requested = []
+    def decode(path, timestamps, video_backend):
+        start = next(value['start'] for value in ep['videos'].values() if value['path'] == path)
+        indices = [round((time-start)*50) for time in timestamps]
+        requested.append(indices)
+        return np.stack([np.full((24,32,3), step, np.uint8) for step in indices])
+    monkeypatch.setattr(video, 'get_frames_by_timestamps', decode)
+    row = dataset[0]
+    assert requested == [[0,40,80,120,160]] * 3
+    assert [im.getpixel((100,100))[0] for im in row['image']] == [0,40,80,120,160]
+    assert row['frame_index'] == 160

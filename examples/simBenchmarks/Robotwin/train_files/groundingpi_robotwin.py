@@ -114,7 +114,7 @@ def prepare(args):
 def config(args):
     from omegaconf import OmegaConf
     framework = getattr(args, 'framework', 'pi_v3')
-    cfg = OmegaConf.load(HERE / ({'pi05': 'groundingpipi05_clean.yaml', 'pi05_eef': 'groundingpipi05_eef_clean.yaml'}.get(framework, 'groundingpipi_v3_clean.yaml')))
+    cfg = OmegaConf.load(getattr(args, 'config_yaml', None) or HERE / ({'pi05': 'groundingpipi05_clean.yaml', 'pi05_eef': 'groundingpipi05_eef_clean.yaml'}.get(framework, 'groundingpipi_v3_clean.yaml')))
     if getattr(args, "knowledge_insulation", False):
         if framework != "pi05":
             raise ValueError("Knowledge insulation requires pi05")
@@ -154,13 +154,22 @@ def config(args):
             separate = cfg.datasets.vla_data.image_input_mode == 'separate'
             cfg.framework.cot_training_mode = 'separate_head_v1' if separate else 'shared_canvas_v1'
             cfg.framework.cot_prompt = SEPARATE_COT_PROMPT if separate else COMPOSITE_COT_PROMPT
+    history = int(cfg.datasets.vla_data.get('history_frames', 0))
+    if history:
+        if framework != 'pi05_eef' or getattr(args, 'dataset_root', None) is None or args.image_input_mode != 'composite' or not args.with_cot:
+            raise ValueError('History config requires pi05_eef LeRobot composite CoT')
+        cfg.framework.cot_training_mode = 'history_canvas_v1'
+        cfg.framework.cot_prompt = (
+            'Five three-view composite images are provided: episode first frame, then '
+            't-120, t-80, t-40, and current t. Unavailable past frames repeat current t. '
+            'Ground objects in the FIFTH (current) image only. ' + COMPOSITE_COT_PROMPT)
     cfg.trainer.gradient_accumulation_steps = getattr(args, 'gradient_accumulation_steps', 1)
     cfg.trainer.max_train_steps = args.steps
     for name in ('num_warmup_steps', 'health_check_interval', 'save_interval'):
         value = getattr(args, name, None)
         if value is not None:
             cfg.trainer[name] = value
-    cfg.trainer.logging_frequency = min(10, args.steps)
+    cfg.trainer.logging_frequency = 1 if args.steps <= 20 else 10
     cfg.run_root_dir, cfg.run_id = str(args.output.resolve().parent), args.output.name
     return cfg
 
@@ -168,6 +177,11 @@ def config(args):
 def validation_path(args):
     size = getattr(args, 'image_size', 224)
     framework = getattr(args, 'framework', 'pi_v3')
+    if framework == 'pi05_eef' and getattr(args, 'config_yaml', None):
+        from omegaconf import OmegaConf
+        data = OmegaConf.load(args.config_yaml).datasets.vla_data
+        if data.get('history_frames', 0):
+            return args.data_root / f'validation_report_history{int(data.history_frames)+1}_stride{int(data.history_stride)}.json'
     if framework == 'pi05_eef':
         return args.data_root / ('validation_report_pi05_eef_lerobot.json' if getattr(args, 'dataset_root', None) is not None else 'validation_report_pi05_eef.json')
     if framework == 'pi05':
@@ -353,7 +367,11 @@ def train(args):
                      [384, 320] if getattr(args, 'framework', None) == 'pi05_eef' else [size, size])
     if report.get('model_contract', {}).get('image_size') != expected_size:
         raise ValueError('Run validate at the requested image size before preparing a launch')
-    expected_count = 3 if separate else 1
+    history_cfg = config(args).datasets.vla_data
+    history = int(history_cfg.get('history_frames', 0))
+    expected_count = 5 if history else 3 if separate else 1
+    if history and report.get('model_contract', {}).get('history') != dict(frames=history, stride=int(history_cfg.history_stride), include_first=True, pad='current', cot_target='current'):
+        raise ValueError('Run validate with the requested history contract')
     if report.get('model_contract', {}).get('image_count') != expected_count:
         raise ValueError('Run validate with the requested image input mode before preparing a launch')
     if not (args.model / 'config.json').is_file():
@@ -412,6 +430,8 @@ def train(args):
                     '--instruction-source', getattr(args, 'instruction_source', 'default')]
         if args.with_cot:
             guarded.append('--with-cot')
+    if getattr(args, 'config_yaml', None):
+        guarded += ['--config-yaml', str(args.config_yaml.resolve())]
     if getattr(args, 'knowledge_insulation', False):
         guarded.append('--knowledge-insulation')
     guarded += ['--color-jitter', str(getattr(args, 'color_jitter', 0.0))]
@@ -438,7 +458,8 @@ def main():
     parser.add_argument('command', choices=['prepare','validate','train'])
     parser.add_argument('--framework', choices=('pi_v3', 'pi05', 'pi05_eef'), default='pi_v3')
     parser.add_argument('--knowledge-insulation', action='store_true')
-    parser.add_argument('--color-jitter', type=float, default=0.0)
+    parser.add_argument('--config-yaml', type=Path)
+    parser.add_argument('--color-jitter', type=float, default=None)
     parser.add_argument('--filter-static-segments', action='store_true')
     parser.add_argument('--num-warmup-steps', type=int)
     parser.add_argument('--health-check-interval', type=int)
@@ -464,6 +485,9 @@ def main():
     parser.add_argument('--sample-episodes', type=int, default=12)
     parser.add_argument('--dry-run', action='store_true', help='Generate launch artifacts without starting training')
     args = parser.parse_args()
+    if args.color_jitter is None:
+        from omegaconf import OmegaConf
+        args.color_jitter = float(OmegaConf.load(args.config_yaml).datasets.vla_data.get('color_jitter', 0.0)) if args.config_yaml else 0.0
     import math
     if args.dataset_root is not None and args.framework != 'pi05_eef':
         parser.error('--dataset-root requires pi05_eef')

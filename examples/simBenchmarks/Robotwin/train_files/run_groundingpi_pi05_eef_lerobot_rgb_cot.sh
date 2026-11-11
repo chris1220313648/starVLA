@@ -10,7 +10,7 @@ GPUS="${GPUS:-0,1,2,3,4,5,6,7}"
 BATCH_SIZE="${BATCH_SIZE:-16}"
 cd "$REPO_ROOT"
 # Fail before training if the existing benchmark scenes cannot be reused.
-"$SDK_PYTHON" "$HERE/evaluate_groundingpi_cached.py" --check-cache
+"$SDK_PYTHON" "$HERE/../eval_files/evaluate_groundingpi_cached.py" --check-cache
 "$STARVLA_PYTHON" "$HERE/run_groundingpi_pi05_pipeline.py" "$@" \
   --eef --steps 50000 --batch-size "$BATCH_SIZE" --gpus "$GPUS" \
   --dataset-root /share/project/robot-rfm/robot-processed-data/lerobot_v3_data/robotwin2.0_EEF20_RGB_Lerobotv3 \
@@ -18,5 +18,5 @@ cd "$REPO_ROOT"
   --with-cot --image-input-mode composite --color-jitter 0 --cot-loss-weight 1 \
   --train-only --output "$OUTPUT_PATH"
 CHECKPOINT="$OUTPUT_PATH/$("$STARVLA_PYTHON" -c 'import json,sys; from pathlib import Path; print(Path(json.load(open(sys.argv[1]))["run_dir"]).name)' "$OUTPUT_PATH/status.json")/final_model/pytorch_model.pt"
-exec "$SDK_PYTHON" "$HERE/evaluate_groundingpi_cached.py" \
+exec "$SDK_PYTHON" "$HERE/../eval_files/evaluate_groundingpi_cached.py" \
   --checkpoint "$CHECKPOINT" --output "$OUTPUT_PATH/eval" --gpus "$GPUS"

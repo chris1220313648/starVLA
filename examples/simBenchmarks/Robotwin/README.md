@@ -781,10 +781,54 @@ Copied scene caches, provenance, logs and per-task reports are stored under the
 new checkpoint directory's `eval/`. Cache hashes and the RoboTwin revision must
 match the earlier `step50000_50x20_20261105` run; failures stop the workflow.
 
+To evaluate an existing checkpoint independently with RoboScope, run from the
+starVLA repository root:
+
+```bash
+../../envs/roboscope-kit/bin/python \
+  examples/simBenchmarks/Robotwin/eval_files/evaluate_groundingpi_cached.py \
+  --checkpoint /absolute/path/to/pytorch_model.pt \
+  --output /absolute/path/to/fresh-evaluation-directory \
+  --gpus 0,1,2,3,4,5,6,7 \
+  --suites demo_clean demo_randomized
+```
+
+Use a Python environment with RoboScope installed; replace the interpreter path
+above if your environment is elsewhere. `--checkpoint` must be an existing file
+and `--output` must not already exist. `--gpus` selects GPU IDs; use
+`--suites demo_clean` to evaluate only Clean. Each selected suite runs a smoke
+test followed by 50 tasks with 20 episodes each. The entrypoint now lives in
+`eval_files/`; the former `train_files/` entrypoint has been removed.
+
+To check cached scenes without loading a model, run:
+
+```bash
+../../envs/roboscope-kit/bin/python \
+  examples/simBenchmarks/Robotwin/eval_files/check_cached_scenes.py
+```
+
+This validates the cache, then uses `envs/robotwin/bin/python` to initialize the
+first cached `adjust_bottle` scene in each suite, read three cameras and robot
+state, and advance ten physics steps. No `starvla` environment or policy server
+is used. Defaults are GPU 0 and cache `cache_20261110_170840`; override with
+`--gpu`, `--task`, or `--cache-source`. Logs, before/after PNGs and `summary.json`
+are saved under a fresh `/tmp/robotwin_scene_check_*` directory, or `--output`.
+Each scene has a 300-second timeout. This checks scene operation, not policy
+success or the complete RoboScope evaluation path.
+
 For a fresh EEF20 run with OpenWAM-matched color jitter and static-window
 resampling, add `--color-jitter 0.2 --filter-static-segments` to
 `run_groundingpi_pi05_eef.sh --output <fresh-experiment-directory>`.
-Both options default off. Brightness, contrast and saturation are applied in
+For the seen100 RGB CoT recipe (loss weight 0.1), use
+`bash examples/simBenchmarks/Robotwin/train_files/run_groundingpi_pi05_eef_lerobot_rgb_cot01_seen100_aug.sh`.
+It trains for 50k steps on eight GPUs, enables jitter 0.2 and static resampling,
+saves every 5k steps, then evaluates the verified final checkpoint on clean and
+randomized (50 tasks × 20 episodes each) using `cache_20261110_170840`.
+`GPUS`, `BATCH_SIZE`, `OUTPUT_PATH` and `CACHE_SOURCE` can override the defaults.
+The pipeline's `--save-interval` defaults to 1000 for other launchers; smoke
+training still saves at its final step. Logs and evaluation results live under
+the fresh experiment directory, with evaluation output in `eval/`.
+Both options default off in the generic EEF20 launcher. Brightness, contrast and saturation are applied in
 that order to the composed image, with separate uniform factors in [0.8, 1.2].
 A static window has maximum normalized first-action/state difference below
 1e-5; up to three uniformly sampled alternatives are tried, retaining the
